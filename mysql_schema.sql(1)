@@ -1,0 +1,142 @@
+-- Esquema SQL para o Coletor de Dados Elite Dangerous
+-- O usuário solicitou a separação de dados do piloto e do universo.
+
+-- 1. Banco de Dados do Piloto (db_piloto)
+
+CREATE DATABASE IF NOT EXISTS db_piloto;
+USE db_piloto;
+
+-- Tabela para armazenar o status atual do piloto e da nave
+CREATE TABLE IF NOT EXISTS pilot_status (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    commander_name VARCHAR(100) NOT NULL,
+    current_system VARCHAR(255),
+    ship_id INT UNIQUE, -- ID da nave no jogo
+    ship_name VARCHAR(100),
+    ship_model VARCHAR(100),
+    ship_ident VARCHAR(10), -- Identificação da nave (ex: ABC-001)
+    is_docked BOOLEAN DEFAULT FALSE,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- Tabela para armazenar os módulos da nave
+CREATE TABLE IF NOT EXISTS ship_modules (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    ship_id INT NOT NULL,
+    slot VARCHAR(100) NOT NULL,
+    module_name VARCHAR(255) NOT NULL,
+    module_class INT,
+    module_rating CHAR(1),
+    is_enabled BOOLEAN DEFAULT TRUE,
+    health DOUBLE,
+    power_draw DOUBLE,
+    UNIQUE KEY unique_module (ship_id, slot),
+    FOREIGN KEY (ship_id) REFERENCES pilot_status(ship_id)
+);
+
+-- Tabela para armazenar todos os eventos do diário (Journal)
+-- O campo Event_JSON guarda o JSON completo do evento para flexibilidade
+CREATE TABLE IF NOT EXISTS journal_events (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    event_type VARCHAR(50) NOT NULL,
+    commander_name VARCHAR(100),
+    event_json JSON NOT NULL,
+    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabela de Viagens (simplificada a partir de FSDJump, Docked, Undocked)
+CREATE TABLE IF NOT EXISTS pilot_journeys (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    system_name VARCHAR(255) NOT NULL,
+    star_class VARCHAR(50),
+    distance_from_sol DOUBLE,
+    jump_distance DOUBLE,
+    is_docked BOOLEAN DEFAULT FALSE,
+    FOREIGN KEY (id) REFERENCES journal_events(id) -- Opcional: linkar ao evento original
+);
+
+-- Tabela de Transações (simplificada a partir de Buy/Sell/Market events)
+CREATE TABLE IF NOT EXISTS pilot_transactions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    station_name VARCHAR(255) NOT NULL,
+    commodity_name VARCHAR(255) NOT NULL,
+    transaction_type ENUM('BUY', 'SELL', 'MINING', 'MISSION_REWARD') NOT NULL,
+    price INT,
+    quantity INT,
+    total_cost INT
+);
+
+-- 2. Banco de Dados do Universo (db_universo)
+
+CREATE DATABASE IF NOT EXISTS db_universo;
+USE db_universo;
+
+-- Tabela de Sistemas Estelares (obtidos via EDDN ou Journal)
+CREATE TABLE IF NOT EXISTS star_systems (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    system_name VARCHAR(255) UNIQUE NOT NULL,
+    system_address BIGINT UNIQUE,
+    x DOUBLE,
+    y DOUBLE,
+    z DOUBLE,
+    allegiance VARCHAR(100),
+    government VARCHAR(100),
+    population BIGINT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
+-- Tabela de Estações (obtidos via EDDN ou Journal)
+CREATE TABLE IF NOT EXISTS stations (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    station_name VARCHAR(255) NOT NULL,
+    system_name VARCHAR(255) NOT NULL,
+    station_type VARCHAR(100),
+    distance_from_star INT,
+    market_id BIGINT,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (system_name) REFERENCES star_systems(system_name)
+);
+
+-- Tabela de Preços de Commodities (obtidos via EDDN)
+CREATE TABLE IF NOT EXISTS commodity_prices (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    station_name VARCHAR(255) NOT NULL,
+    commodity_name VARCHAR(255) NOT NULL,
+    supply INT,
+    demand INT,
+    buy_price INT,
+    sell_price INT,
+    FOREIGN KEY (station_name) REFERENCES stations(station_name)
+);
+
+-- Tabela de Corpos Celestes (Estrelas, Planetas, Luas)
+CREATE TABLE IF NOT EXISTS system_bodies (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    system_name VARCHAR(255) NOT NULL,
+    body_id INT NOT NULL, -- ID do corpo no sistema
+    body_name VARCHAR(255) NOT NULL,
+    body_type VARCHAR(50) NOT NULL, -- Star, Planet, Moon
+    distance_from_arrival_ls DOUBLE,
+    is_landable BOOLEAN,
+    is_mapped BOOLEAN,
+    is_terraforming BOOLEAN,
+    materials JSON, -- Materiais de superfície (JSON)
+    UNIQUE KEY unique_body (system_name, body_id),
+    FOREIGN KEY (system_name) REFERENCES star_systems(system_name)
+);
+
+-- Tabela de Pontos de Interesse (POI) / Encontros (Signals)
+CREATE TABLE IF NOT EXISTS system_signals (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    system_name VARCHAR(255) NOT NULL,
+    signal_name VARCHAR(255) NOT NULL,
+    signal_type VARCHAR(100),
+    is_threat BOOLEAN,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_signal (system_name, signal_name, signal_type)
+);

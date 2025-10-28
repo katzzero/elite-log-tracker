@@ -1,0 +1,5 @@
+mysql-connector-python
+watchdog
+requests
+PySide6 # Escolhendo PySide6 (Qt) para a GUI cross-platform
+

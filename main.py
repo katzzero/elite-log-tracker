@@ -1,0 +1,820 @@
+import os
+import json
+import time
+import logging
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from mysql.connector import connect, Error
+
+# Configuração de Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Variáveis de Configuração (A serem lidas de um arquivo de configuração ou GUI)
+import threading
+from eddn_client import start_eddn_monitoring
+# Variáveis de Configuração (A serem lidas de um arquivo de configuração ou GUI)
+JOURNAL_DIR = os.path.expanduser('~/Saved Games/Frontier Developments/Elite Dangerous') # Caminho padrão no Windows
+DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'ed_user', # Usuário e senha a serem definidos pelo usuário
+    'password': 'ed_password',
+}
+import threading
+from eddn_client import start_eddn_monitoring
+
+# --- Funções de Banco de Dados ---
+
+def get_db_connection(db_name):
+    """Cria e retorna uma conexão com o banco de dados especificado."""
+    try:
+        conn = connect(database=db_name, **DB_CONFIG)
+        return conn
+    except Error as e:
+        logging.error(f"Erro ao conectar ao banco de dados {db_name}: {e}")
+        return None
+
+def insert_journal_event(event_data):
+    """Insere o evento JSON bruto na tabela journal_events do db_piloto."""
+    conn = get_db_connection('db_piloto')
+    if not conn:
+        return
+
+    try:
+        cursor = conn.cursor()
+        sql = """
+        INSERT INTO journal_events (timestamp, event_type, commander_name, event_json)
+        VALUES (%s, %s, %s, %s)
+        """
+        
+        # Extrai campos básicos
+        timestamp = event_data.get('timestamp')
+        event_type = event_data.get('event')
+        commander = event_data.get('Commander') # Pode não existir em todos os eventos
+        
+        # Converte o JSON do evento de volta para string para o campo JSON do MySQL
+        event_json_str = json.dumps(event_data)
+
+        cursor.execute(sql, (timestamp, event_type, commander, event_json_str))
+        conn.commit()
+        logging.info(f"Evento '{event_type}' inserido no db_piloto.")
+
+        # Retorna o ID do evento inserido (útil para chaves estrangeiras)
+        return cursor.lastrowid
+
+    except Error as e:
+        logging.error(f"Erro ao inserir evento no db_piloto: {e}")
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+def process_event(event_data):
+    """Processa o evento do diário, insere o JSON bruto e chama o processamento específico."""
+    
+    # 1. Inserir o evento JSON bruto (Dados do Piloto)
+    event_id = insert_journal_event(event_data)
+    if not event_id:
+        return
+
+    event_type = event_data.get('event')
+    
+    # 2. Processamento específico para tabelas resumidas
+    if event_type == 'FSDJump':
+        process_fsd_jump(event_data, event_id)
+    elif event_type in ['BuyCommodity', 'SellCommodity']:
+        process_transaction(event_data, event_id)
+    # Adicionar mais eventos conforme necessário
+
+def process_fsd_jump(event_data, event_id):
+    """Processa o evento FSDJump e insere na tabela pilot_journeys e star_systems."""
+    
+    # Dados do Piloto (db_piloto.pilot_journeys)
+    conn_piloto = get_db_connection('db_piloto')
+    if conn_piloto:
+        try:
+            cursor = conn_piloto.cursor()
+            sql = """
+            INSERT INTO pilot_journeys (timestamp, system_name, jump_distance)
+            VALUES (%s, %s, %s)
+            """
+            timestamp = event_data.get('timestamp')
+            system_name = event_data.get('StarSystem')
+            jump_distance = event_data.get('JumpDist')
+            
+            cursor.execute(sql, (timestamp, system_name, jump_distance))
+            conn_piloto.commit()
+            logging.info(f"Viagem para '{system_name}' registrada.")
+        except Error as e:
+            logging.error(f"Erro ao inserir viagem: {e}")
+        finally:
+            if conn_piloto and conn_piloto.is_connected():
+                cursor.close()
+                conn_piloto.close()
+
+    # Dados do Universo (db_universo.star_systems) - Insere ou atualiza
+    conn_universo = get_db_connection('db_universo')
+    if conn_universo:
+        try:
+            cursor = conn_universo.cursor()
+            sql = """
+            INSERT INTO star_systems (system_name, system_address, x, y, z, allegiance, government, population)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                allegiance=VALUES(allegiance), government=VALUES(government), population=VALUES(population)
+            """
+            
+            system_name = event_data.get('StarSystem')
+            system_address = event_data.get('SystemAddress')
+            pos = event_data.get('StarPos', [None, None, None])
+            allegiance = event_data.get('SystemAllegiance')
+            government = event_data.get('SystemGovernment')
+            population = event_data.get('SystemPopulation')
+
+            cursor.execute(sql, (system_name, system_address, pos[0], pos[1], pos[2], allegiance, government, population))
+            conn_universo.commit()
+            logging.info(f"Sistema '{system_name}' atualizado no db_universo.")
+        except Error as e:
+            logging.error(f"Erro ao inserir/atualizar sistema: {e}")
+        finally:
+            if conn_universo and conn_universo.is_connected():
+                cursor.close()
+                conn_universo.close()
+
+def process_transaction(event_data, event_id):
+    """Processa eventos de compra/venda de commodities."""
+    conn_piloto = get_db_connection('db_piloto')
+    if not conn_piloto:
+        return
+
+    try:
+        cursor = conn_piloto.cursor()
+        sql = """
+        INSERT INTO pilot_transactions (timestamp, station_name, commodity_name, transaction_type, price, quantity, total_cost)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        timestamp = event_data.get('timestamp')
+        station_name = event_data.get('StationName')
+        commodity_name = event_data.get('Name')
+        transaction_type = 'BUY' if event_data.get('event') == 'BuyCommodity' else 'SELL'
+        price = event_data.get('Price')
+        quantity = event_data.get('Count')
+        total_cost = event_data.get('TotalCost')
+
+        cursor.execute(sql, (timestamp, station_name, commodity_name, transaction_type, price, quantity, total_cost))
+        conn_piloto.commit()
+        logging.info(f"Transação '{transaction_type}' de {quantity}x {commodity_name} registrada.")
+
+    except Error as e:
+        logging.error(f"Erro ao inserir transação: {e}")
+    finally:
+        if conn_piloto and conn_piloto.is_connected():
+            cursor.close()
+            conn_piloto.close()
+
+
+# --- Funções de Monitoramento de Arquivos ---
+
+def get_latest_journal_file(directory):
+    """Encontra o arquivo de diário mais recente no diretório."""
+    try:
+        files = [os.path.join(directory, f) for f in os.listdir(directory) if f.startswith('Journal.') and f.endswith('.log')]
+        if not files:
+            return None
+        # O formato do nome do arquivo é 'Journal.YYYY-MM-DDTHHMMSS.XX.log', então a ordenação alfabética funciona
+        return max(files, key=os.path.getmtime)
+    except FileNotFoundError:
+        logging.error(f"Diretório de logs não encontrado: {directory}")
+        return None
+    except Exception as e:
+        logging.error(f"Erro ao buscar arquivo de log mais recente: {e}")
+        return None
+
+class JournalFileMonitor(FileSystemEventHandler):
+    """Manipulador de eventos do Watchdog para monitorar a escrita no arquivo de diário."""
+    
+    def __init__(self, journal_path):
+        self.journal_path = journal_path
+        self.file_handle = None
+        self.open_file()
+
+    def open_file(self):
+        """Abre o arquivo de diário e move o ponteiro para o final."""
+        if self.file_handle:
+            self.file_handle.close()
+        
+        # Abre o arquivo no modo de leitura de texto ('r')
+        # 'encoding='utf-8'' é importante para JSON
+        try:
+            self.file_handle = open(self.journal_path, 'r', encoding='utf-8')
+            # Move o ponteiro para o final do arquivo para ler apenas novos dados
+            self.file_handle.seek(0, os.SEEK_END)
+            logging.info(f"Monitorando o arquivo: {self.journal_path}")
+        except Exception as e:
+            logging.error(f"Não foi possível abrir o arquivo {self.journal_path}: {e}")
+            self.file_handle = None
+
+    def on_modified(self, event):
+        """Chamado quando o arquivo de diário é modificado."""
+        if event.src_path == self.journal_path and not event.is_directory:
+            self.read_new_lines()
+
+    def read_new_lines(self):
+        """Lê e processa as novas linhas adicionadas ao arquivo."""
+        if not self.file_handle:
+            self.open_file() # Tenta reabrir se estiver fechado
+            if not self.file_handle:
+                return
+
+        new_data = self.file_handle.readlines()
+        
+        for line in new_data:
+            try:
+                # Cada linha é um objeto JSON válido (JSON Lines - JSONL)
+                event_data = json.loads(line)
+                process_event(event_data)
+            except json.JSONDecodeError as e:
+                logging.error(f"Erro ao decodificar JSON: {e} na linha: {line.strip()}")
+            except Exception as e:
+                logging.error(f"Erro desconhecido ao processar linha: {e}")
+
+    def stop(self):
+        """Fecha o handle do arquivo."""
+        if self.file_handle:
+            self.file_handle.close()
+
+class BackendCore:
+    def __init__(self, db_config, journal_dir):
+        self.DB_CONFIG = db_config
+        self.JOURNAL_DIR = journal_dir
+        self.observer = None
+        self.event_handler = None
+        self.monitoring_thread = None
+        self.eddn_thread = None
+        self.is_running = False
+
+    def get_db_connection(self, db_name):
+        """Cria e retorna uma conexão com o banco de dados especificado."""
+        try:
+            conn = connect(database=db_name, **self.DB_CONFIG)
+            return conn
+        except Error as e:
+            logging.error(f"Erro ao conectar ao banco de dados {db_name}: {e}")
+            return None
+
+    def insert_journal_event(self, event_data):
+        # ... (Mantém a lógica de inserção, usando self.get_db_connection)
+        conn = self.get_db_connection('db_piloto')
+        if not conn:
+            return
+
+        try:
+            cursor = conn.cursor()
+            sql = """
+            INSERT INTO journal_events (timestamp, event_type, commander_name, event_json)
+            VALUES (%s, %s, %s, %s)
+            """
+            
+            timestamp = event_data.get('timestamp')
+            event_type = event_data.get('event')
+            commander = event_data.get('Commander')
+            event_json_str = json.dumps(event_data)
+
+            cursor.execute(sql, (timestamp, event_type, commander, event_json_str))
+            conn.commit()
+            logging.info(f"Evento '{event_type}' inserido no db_piloto.")
+
+            return cursor.lastrowid
+
+        except Error as e:
+            logging.error(f"Erro ao inserir evento no db_piloto: {e}")
+        finally:
+            if conn and conn.is_connected():
+                cursor.close()
+                conn.close()
+
+    def process_event(self, event_data):
+        # ... (Mantém a lógica de processamento)
+        event_id = self.insert_journal_event(event_data)
+        if not event_id:
+            return
+
+        event_type = event_data.get('event')
+        
+        if event_type == 'FSDJump':
+            self.process_fsd_jump(event_data, event_id)
+        elif event_type in ['BuyCommodity', 'SellCommodity']:
+            self.process_transaction(event_data, event_id)
+
+    def process_fsd_jump(self, event_data, event_id):
+        # ... (Mantém a lógica, usando self.get_db_connection)
+        conn_piloto = self.get_db_connection('db_piloto')
+        if conn_piloto:
+            try:
+                cursor = conn_piloto.cursor()
+                sql = """
+                INSERT INTO pilot_journeys (timestamp, system_name, jump_distance)
+                VALUES (%s, %s, %s)
+                """
+                timestamp = event_data.get('timestamp')
+                system_name = event_data.get('StarSystem')
+                jump_distance = event_data.get('JumpDist')
+                
+                cursor.execute(sql, (timestamp, system_name, jump_distance))
+                conn_piloto.commit()
+                logging.info(f"Viagem para '{system_name}' registrada.")
+            except Error as e:
+                logging.error(f"Erro ao inserir viagem: {e}")
+            finally:
+                if conn_piloto and conn_piloto.is_connected():
+                    cursor.close()
+                    conn_piloto.close()
+
+        conn_universo = self.get_db_connection('db_universo')
+        if conn_universo:
+            try:
+                cursor = conn_universo.cursor()
+                sql = """
+                INSERT INTO star_systems (system_name, system_address, x, y, z, allegiance, government, population)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE 
+                    allegiance=VALUES(allegiance), government=VALUES(government), population=VALUES(population)
+                """
+                
+                system_name = event_data.get('StarSystem')
+                system_address = event_data.get('SystemAddress')
+                pos = event_data.get('StarPos', [None, None, None])
+                allegiance = event_data.get('SystemAllegiance')
+                government = event_data.get('SystemGovernment')
+                population = event_data.get('SystemPopulation')
+
+                cursor.execute(sql, (system_name, system_address, pos[0], pos[1], pos[2], allegiance, government, population))
+                conn_universo.commit()
+                logging.info(f"Sistema '{system_name}' atualizado no db_universo.")
+            except Error as e:
+                logging.error(f"Erro ao inserir/atualizar sistema: {e}")
+            finally:
+                if conn_universo and conn_universo.is_connected():
+                    cursor.close()
+                    conn_universo.close()
+
+    def process_transaction(self, event_data, event_id):
+        # ... (Mantém a lógica, usando self.get_db_connection)
+        conn_piloto = self.get_db_connection('db_piloto')
+        if not conn_piloto:
+            return
+
+        try:
+            cursor = conn_piloto.cursor()
+            sql = """
+            INSERT INTO pilot_transactions (timestamp, station_name, commodity_name, transaction_type, price, quantity, total_cost)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            timestamp = event_data.get('timestamp')
+            station_name = event_data.get('StationName')
+            commodity_name = event_data.get('Name')
+            transaction_type = 'BUY' if event_data.get('event') == 'BuyCommodity' else 'SELL'
+            price = event_data.get('Price')
+            quantity = event_data.get('Count')
+            total_cost = event_data.get('TotalCost')
+
+            cursor.execute(sql, (timestamp, station_name, commodity_name, transaction_type, price, quantity, total_cost))
+            conn_piloto.commit()
+            logging.info(f"Transação '{transaction_type}' de {quantity}x {commodity_name} registrada.")
+
+        except Error as e:
+            logging.error(f"Erro ao inserir transação: {e}")
+        finally:
+            if conn_piloto and conn_piloto.is_connected():
+                cursor.close()
+                conn_piloto.close()
+
+    def start_monitoring(self):
+        """Inicia o monitoramento do arquivo de diário mais recente e EDDN."""
+        if self.is_running:
+            logging.info("O monitoramento já está em execução.")
+            return
+
+        latest_file = get_latest_journal_file(self.JOURNAL_DIR)
+        
+        if not latest_file:
+            logging.error("Nenhum arquivo de diário encontrado. Verifique o caminho.")
+            return
+
+        # 1. Monitoramento de Logs (Journal)
+        self.event_handler = JournalFileMonitor(latest_file, self.process_event)
+        self.observer = Observer()
+        
+        # Monitora o diretório onde o arquivo de diário está
+        self.observer.schedule(self.event_handler, path=os.path.dirname(latest_file), recursive=False)
+        self.observer.start()
+        
+        # 2. Monitoramento EDDN (em thread separado)
+        self.eddn_thread = threading.Thread(target=start_eddn_monitoring)
+        self.eddn_thread.daemon = True # Permite que o programa principal saia mesmo que o thread esteja rodando
+        self.eddn_thread.start()
+
+        self.is_running = True
+        logging.info("Monitoramento de Logs e EDDN iniciado.")
+
+    def stop_monitoring(self):
+        """Para o monitoramento."""
+        if self.observer:
+            self.observer.stop()
+            self.observer.join()
+        if self.event_handler:
+            self.event_handler.stop()
+        
+        self.is_running = False
+        logging.info("Monitoramento parado.")
+
+# --- Funções de Monitoramento de Arquivos (fora da classe para manter a compatibilidade) ---
+
+def get_latest_journal_file(directory):
+    """Encontra o arquivo de diário mais recente no diretório."""
+    try:
+        files = [os.path.join(directory, f) for f in os.listdir(directory) if f.startswith('Journal.') and f.endswith('.log')]
+        if not files:
+            return None
+        return max(files, key=os.path.getmtime)
+    except FileNotFoundError:
+        logging.error(f"Diretório de logs não encontrado: {directory}")
+        return None
+    except Exception as e:
+        logging.error(f"Erro ao buscar arquivo de log mais recente: {e}")
+        return None
+
+class JournalFileMonitor(FileSystemEventHandler):
+    """Manipulador de eventos do Watchdog para monitorar a escrita no arquivo de diário."""
+    
+    def __init__(self, journal_path, event_processor_callback):
+        self.journal_path = journal_path
+        self.file_handle = None
+        self.event_processor_callback = event_processor_callback
+        self.open_file()
+
+    def open_file(self):
+        """Abre o arquivo de diário e move o ponteiro para o final."""
+        if self.file_handle:
+            self.file_handle.close()
+        
+        try:
+            self.file_handle = open(self.journal_path, 'r', encoding='utf-8')
+            self.file_handle.seek(0, os.SEEK_END)
+            logging.info(f"Monitorando o arquivo: {self.journal_path}")
+        except Exception as e:
+            logging.error(f"Não foi possível abrir o arquivo {self.journal_path}: {e}")
+            self.file_handle = None
+
+    def on_modified(self, event):
+        """Chamado quando o arquivo de diário é modificado."""
+        if event.src_path == self.journal_path and not event.is_directory:
+            self.read_new_lines()
+
+    def read_new_lines(self):
+        """Lê e processa as novas linhas adicionadas ao arquivo."""
+        if not self.file_handle:
+            self.open_file()
+            if not self.file_handle:
+                return
+
+        new_data = self.file_handle.readlines()
+        
+        for line in new_data:
+            try:
+                event_data = json.loads(line)
+                self.event_processor_callback(event_data)
+            except json.JSONDecodeError as e:
+                logging.error(f"Erro ao decodificar JSON: {e} na linha: {line.strip()}")
+            except Exception as e:
+                logging.error(f"Erro desconhecido ao processar linha: {e}")
+
+    def stop(self):
+        """Fecha o handle do arquivo."""
+        if self.file_handle:
+            self.file_handle.close()
+
+# --- Funções de Banco de Dados ---
+
+class BackendCore:
+    def __init__(self, db_config, journal_dir):
+        self.DB_CONFIG = db_config
+        self.JOURNAL_DIR = journal_dir
+        self.observer = None
+        self.event_handler = None
+        self.monitoring_thread = None
+        self.eddn_thread = None
+        self.is_running = False
+
+    def get_db_connection(self, db_name):
+        """Cria e retorna uma conexão com o banco de dados especificado."""
+        try:
+            conn = connect(database=db_name, **self.DB_CONFIG)
+            return conn
+        except Error as e:
+            logging.error(f"Erro ao conectar ao banco de dados {db_name}: {e}")
+            return None
+
+    def insert_journal_event(self, event_data):
+        """Insere o evento JSON bruto na tabela journal_events do db_piloto."""
+        conn = self.get_db_connection('db_piloto')
+        if not conn:
+            return
+
+        try:
+            cursor = conn.cursor()
+            sql = """
+            INSERT INTO journal_events (timestamp, event_type, commander_name, event_json)
+            VALUES (%s, %s, %s, %s)
+            """
+            
+            # Extrai campos básicos
+            timestamp = event_data.get('timestamp')
+            event_type = event_data.get('event')
+            commander = event_data.get('Commander') # Pode não existir em todos os eventos
+            
+            # Converte o JSON do evento de volta para string para o campo JSON do MySQL
+            event_json_str = json.dumps(event_data)
+
+            cursor.execute(sql, (timestamp, event_type, commander, event_json_str))
+            conn.commit()
+            logging.info(f"Evento '{event_type}' inserido no db_piloto.")
+
+            # Retorna o ID do evento inserido (útil para chaves estrangeiras)
+            return cursor.lastrowid
+
+        except Error as e:
+            logging.error(f"Erro ao inserir evento no db_piloto: {e}")
+        finally:
+            if conn and conn.is_connected():
+                cursor.close()
+                conn.close()
+
+    def process_event(self, event_data):
+        """Processa o evento do diário, insere o JSON bruto e chama o processamento específico."""
+        
+        # 1. Inserir o evento JSON bruto (Dados do Piloto)
+        event_id = self.insert_journal_event(event_data)
+        if not event_id:
+            return
+
+        event_type = event_data.get('event')
+        
+        # 2. Processamento específico para tabelas resumidas
+        if event_type == 'FSDJump':
+            self.process_fsd_jump(event_data, event_id)
+        elif event_type in ['BuyCommodity', 'SellCommodity']:
+            self.process_transaction(event_data, event_id)
+        # Adicionar mais eventos conforme necessário
+
+    def process_fsd_jump(self, event_data, event_id):
+        """Processa o evento FSDJump e insere na tabela pilot_journeys e star_systems."""
+        
+        # Dados do Piloto (db_piloto.pilot_journeys)
+        conn_piloto = self.get_db_connection('db_piloto')
+        if conn_piloto:
+            try:
+                cursor = conn_piloto.cursor()
+                sql = """
+                INSERT INTO pilot_journeys (timestamp, system_name, jump_distance)
+                VALUES (%s, %s, %s)
+                """
+                timestamp = event_data.get('timestamp')
+                system_name = event_data.get('StarSystem')
+                jump_distance = event_data.get('JumpDist')
+                
+                cursor.execute(sql, (timestamp, system_name, jump_distance))
+                conn_piloto.commit()
+                logging.info(f"Viagem para '{system_name}' registrada.")
+            except Error as e:
+                logging.error(f"Erro ao inserir viagem: {e}")
+            finally:
+                if conn_piloto and conn_piloto.is_connected():
+                    cursor.close()
+                    conn_piloto.close()
+
+        # Dados do Universo (db_universo.star_systems) - Insere ou atualiza
+        conn_universo = self.get_db_connection('db_universo')
+        if conn_universo:
+            try:
+                cursor = conn_universo.cursor()
+                sql = """
+                INSERT INTO star_systems (system_name, system_address, x, y, z, allegiance, government, population)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE 
+                    allegiance=VALUES(allegiance), government=VALUES(government), population=VALUES(population)
+                """
+                
+                system_name = event_data.get('StarSystem')
+                system_address = event_data.get('SystemAddress')
+                pos = event_data.get('StarPos', [None, None, None])
+                allegiance = event_data.get('SystemAllegiance')
+                government = event_data.get('SystemGovernment')
+                population = event_data.get('SystemPopulation')
+
+                cursor.execute(sql, (system_name, system_address, pos[0], pos[1], pos[2], allegiance, government, population))
+                conn_universo.commit()
+                logging.info(f"Sistema '{system_name}' atualizado no db_universo.")
+            except Error as e:
+                logging.error(f"Erro ao inserir/atualizar sistema: {e}")
+            finally:
+                if conn_universo and conn_universo.is_connected():
+                    cursor.close()
+                    conn_universo.close()
+
+    def process_transaction(self, event_data, event_id):
+        """Processa eventos de compra/venda de commodities."""
+        conn_piloto = self.get_db_connection('db_piloto')
+        if not conn_piloto:
+            return
+
+        try:
+            cursor = conn_piloto.cursor()
+            sql = """
+            INSERT INTO pilot_transactions (timestamp, station_name, commodity_name, transaction_type, price, quantity, total_cost)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """
+            
+            timestamp = event_data.get('timestamp')
+            station_name = event_data.get('StationName')
+            commodity_name = event_data.get('Name')
+            transaction_type = 'BUY' if event_data.get('event') == 'BuyCommodity' else 'SELL'
+            price = event_data.get('Price')
+            quantity = event_data.get('Count')
+            total_cost = event_data.get('TotalCost')
+
+            cursor.execute(sql, (timestamp, station_name, commodity_name, transaction_type, price, quantity, total_cost))
+            conn_piloto.commit()
+            logging.info(f"Transação '{transaction_type}' de {quantity}x {commodity_name} registrada.")
+
+        except Error as e:
+            logging.error(f"Erro ao inserir transação: {e}")
+        finally:
+            if conn_piloto and conn_piloto.is_connected():
+                cursor.close()
+                conn_piloto.close()
+
+    def start_monitoring(self):
+        """Inicia o monitoramento do arquivo de diário mais recente e EDDN."""
+        if self.is_running:
+            logging.info("O monitoramento já está em execução.")
+            return
+
+        latest_file = get_latest_journal_file(self.JOURNAL_DIR)
+        
+        if not latest_file:
+            logging.error("Nenhum arquivo de diário encontrado. Verifique o caminho.")
+            return
+
+        # 1. Monitoramento de Logs (Journal)
+        self.event_handler = JournalFileMonitor(latest_file, self.process_event)
+        self.observer = Observer()
+        
+        # Monitora o diretório onde o arquivo de diário está
+        self.observer.schedule(self.event_handler, path=os.path.dirname(latest_file), recursive=False)
+        self.observer.start()
+        
+        # 2. Monitoramento EDDN (em thread separado)
+        self.eddn_thread = threading.Thread(target=start_eddn_monitoring)
+        self.eddn_thread.daemon = True # Permite que o programa principal saia mesmo que o thread esteja rodando
+        self.eddn_thread.start()
+
+        self.is_running = True
+        logging.info("Monitoramento de Logs e EDDN iniciado.")
+
+    def stop_monitoring(self):
+        """Para o monitoramento."""
+        if self.observer:
+            self.observer.stop()
+            self.observer.join()
+        if self.event_handler:
+            self.event_handler.stop()
+        
+        self.is_running = False
+        logging.info("Monitoramento parado.")
+
+# --- Funções de Monitoramento de Arquivos (fora da classe para manter a compatibilidade) ---
+
+def get_latest_journal_file(directory):
+    """Encontra o arquivo de diário mais recente no diretório."""
+    try:
+        files = [os.path.join(directory, f) for f in os.listdir(directory) if f.startswith('Journal.') and f.endswith('.log')]
+        if not files:
+            return None
+        # O formato do nome do arquivo é 'Journal.YYYY-MM-DDTHHMMSS.XX.log', então a ordenação alfabética funciona
+        return max(files, key=os.path.getmtime)
+    except FileNotFoundError:
+        logging.error(f"Diretório de logs não encontrado: {directory}")
+        return None
+    except Exception as e:
+        logging.error(f"Erro ao buscar arquivo de log mais recente: {e}")
+        return None
+
+class JournalFileMonitor(FileSystemEventHandler):
+    """Manipulador de eventos do Watchdog para monitorar a escrita no arquivo de diário."""
+    
+    def __init__(self, journal_path, event_processor_callback):
+        self.journal_path = journal_path
+        self.file_handle = None
+        self.event_processor_callback = event_processor_callback
+        self.open_file()
+
+    def open_file(self):
+        """Abre o arquivo de diário e move o ponteiro para o final."""
+        if self.file_handle:
+            self.file_handle.close()
+        
+        # Abre o arquivo no modo de leitura de texto ('r')
+        # 'encoding='utf-8'' é importante para JSON
+        try:
+            self.file_handle = open(self.journal_path, 'r', encoding='utf-8')
+            # Move o ponteiro para o final do arquivo para ler apenas novos dados
+            self.file_handle.seek(0, os.SEEK_END)
+            logging.info(f"Monitorando o arquivo: {self.journal_path}")
+        except Exception as e:
+            logging.error(f"Não foi possível abrir o arquivo {self.journal_path}: {e}")
+            self.file_handle = None
+
+    def on_modified(self, event):
+        """Chamado quando o arquivo de diário é modificado."""
+        if event.src_path == self.journal_path and not event.is_directory:
+            self.read_new_lines()
+
+    def read_new_lines(self):
+        """Lê e processa as novas linhas adicionadas ao arquivo."""
+        if not self.file_handle:
+            self.open_file() # Tenta reabrir se estiver fechado
+            if not self.file_handle:
+                return
+
+        new_data = self.file_handle.readlines()
+        
+        for line in new_data:
+            try:
+                # Cada linha é um objeto JSON válido (JSON Lines - JSONL)
+                event_data = json.loads(line)
+                self.event_processor_callback(event_data)
+            except json.JSONDecodeError as e:
+                logging.error(f"Erro ao decodificar JSON: {e} na linha: {line.strip()}")
+            except Exception as e:
+                logging.error(f"Erro desconhecido ao processar linha: {e}")
+
+    def stop(self):
+        """Fecha o handle do arquivo."""
+        if self.file_handle:
+            self.file_handle.close()
+
+if __name__ == '__main__':
+    # Este é um esqueleto do backend.
+    # Em uma aplicação real com GUI (PyQt/PySide), o 'start_monitoring'
+    # rodaria em um thread separado ou integrado ao loop de eventos da GUI.
+    
+    # Antes de rodar, o usuário precisará:
+    # 1. Criar os bancos de dados e tabelas (usando mysql_schema.sql)
+    # 2. Criar o usuário 'ed_user' no MySQL
+    # 3. Instalar as dependências: pip install mysql-connector-python watchdog
+    
+    logging.info("Iniciando o monitoramento do diário...")
+    # start_monitoring() # Descomentar para testar o monitoramento de console
+    logging.info("Backend pronto para ser integrado à GUI.")
+    """Inicia o monitoramento do arquivo de diário mais recente."""
+    latest_file = get_latest_journal_file(JOURNAL_DIR)
+    
+    if not latest_file:
+        logging.error("Nenhum arquivo de diário encontrado. Verifique o caminho.")
+        return
+
+    # O Watchdog monitora o diretório, e o handler lida com o arquivo específico
+    event_handler = JournalFileMonitor(latest_file)
+    observer = Observer()
+    
+    # Monitora o diretório onde o arquivo de diário está
+    observer.schedule(event_handler, path=os.path.dirname(latest_file), recursive=False)
+    observer.start()
+    
+    # O monitoramento deve ser integrado ao loop principal da GUI
+    # Por enquanto, mantemos um loop de execução simples para teste
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    
+    observer.join()
+    event_handler.stop()
+
+if __name__ == '__main__':
+    # Este é um esqueleto do backend.
+    # Em uma aplicação real com GUI (PyQt/PySide), o 'start_monitoring'
+    # rodaria em um thread separado ou integrado ao loop de eventos da GUI.
+    
+    # Antes de rodar, o usuário precisará:
+    # 1. Criar os bancos de dados e tabelas (usando mysql_schema.sql)
+    # 2. Criar o usuário 'ed_user' no MySQL
+    # 3. Instalar as dependências: pip install mysql-connector-python watchdog
+    
+    logging.info("Iniciando o monitoramento do diário...")
+    # start_monitoring() # Descomentar para testar o monitoramento de console
+    logging.info("Backend pronto para ser integrado à GUI.")
+

@@ -1,0 +1,660 @@
+import sys
+import os
+import logging
+import threading
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+        QPushButton, QTextEdit, QLineEdit, QLabel, QStackedWidget, QListWidget, QListWidgetItem, QFileDialog,
+        QMessageBox
+    )
+from PySide6.QtCore import QObject, Signal, Slot, QThread, Qt
+
+# Adiciona o diretório do backend ao path para importação
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'backend')))
+
+# Importa o core do backend
+from main import BackendCore, JOURNAL_DIR, DB_CONFIG
+from csv_exporter import CSVExporter
+
+# Configuração de Logging para capturar logs no GUI
+class LogSignalHandler(logging.Handler, QObject):
+    """Handler de log que emite um sinal para o GUI."""
+    log_record_signal = Signal(str)
+
+    def __init__(self, parent=None):
+        QObject.__init__(self, parent)
+        logging.Handler.__init__(self)
+        self.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.log_record_signal.emit(msg)
+
+class BackendWorker(QObject):
+    """Worker para rodar o BackendCore em uma thread separada."""
+    
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, backend_core):
+        super().__init__()
+        self.backend_core = backend_core
+
+    @Slot()
+    def run(self):
+        """Inicia o monitoramento do backend."""
+        try:
+            self.backend_core.start_monitoring()
+        except Exception as e:
+            self.error.emit(f"Erro fatal no backend: {e}")
+        finally:
+            self.finished.emit()
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Elite Dangerous Data Collector")
+        self.setGeometry(100, 100, 800, 600)
+        
+        # Configura o logger para a GUI
+        self.log_handler = LogSignalHandler()
+        self.log_handler.log_record_signal.connect(self.update_log_viewer)
+        logging.getLogger().addHandler(self.log_handler)
+        logging.getLogger().setLevel(logging.INFO)
+
+        # Inicializa o Core do Backend (com configurações padrão/placeholder)
+        self.backend_core = BackendCore(DB_CONFIG, JOURNAL_DIR)
+        self.backend_thread = None
+        self.backend_worker = None
+
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.main_layout = QVBoxLayout(self.central_widget)
+        
+        # Layout Principal: Menu Lateral (QListWidget) + Conteúdo (QStackedWidget)
+        self.content_layout = QHBoxLayout()
+        self.main_layout.addLayout(self.content_layout)
+
+        # 1. Menu Lateral (QListWidget)
+        self.menu_list = QListWidget()
+        self.menu_list.setMaximumWidth(150)
+        self.content_layout.addWidget(self.menu_list)
+
+        # 2. Conteúdo (QStackedWidget)
+        self.stacked_widget = QStackedWidget()
+        self.content_layout.addWidget(self.stacked_widget)
+
+        # Configuração das Views
+        self.views = {}
+        self.setup_views()
+
+        # Configuração do Menu
+        self.menu_list.currentRowChanged.connect(self.stacked_widget.setCurrentIndex)
+        self.menu_list.setCurrentRow(0) # Seleciona o primeiro item (Configuração)
+
+        # Log Viewer na parte inferior
+        self.log_viewer = QTextEdit()
+        self.log_viewer.setReadOnly(True)
+        self.log_viewer.setFixedHeight(100) # Altura fixa para o log
+        self.main_layout.addWidget(QLabel("Log de Eventos:"))
+        self.main_layout.addWidget(self.log_viewer)
+        
+        self.update_status("Pronto para configurar e iniciar.")
+
+    def setup_views(self):
+        """Configura todas as views e o menu lateral."""
+        
+        # 1. Configuração
+        config_widget = QWidget()
+        self.views['Configuração'] = config_widget
+        layout = QVBoxLayout(config_widget)
+        self.stacked_widget.addWidget(config_widget)
+        self.menu_list.addItem("Configuração")
+
+        # Configuração do MySQL
+        layout.addWidget(QLabel("--- Configuração MySQL ---"))
+        self.mysql_host = QLineEdit("localhost")
+        self.mysql_user = QLineEdit("ed_user")
+        self.mysql_pass = QLineEdit("ed_password")
+        
+        layout.addWidget(QLabel("Host:"))
+        layout.addWidget(self.mysql_host)
+        layout.addWidget(QLabel("Usuário:"))
+        layout.addWidget(self.mysql_user)
+        layout.addWidget(QLabel("Senha:"))
+        layout.addWidget(self.mysql_pass)
+
+        # Configuração do Journal Path
+        layout.addWidget(QLabel("\n--- Caminho do Diário (Journal Path) ---"))
+        self.journal_path_input = QLineEdit(JOURNAL_DIR)
+        self.journal_path_input.setPlaceholderText("Ex: C:\\Users\\SeuUsuario\\Saved Games\\Frontier Developments\\Elite Dangerous")
+        
+        self.browse_button = QPushButton("Procurar Diretório")
+        self.browse_button.clicked.connect(self.browse_journal_path)
+        
+        path_layout = QHBoxLayout()
+        path_layout.addWidget(self.journal_path_input)
+        path_layout.addWidget(self.browse_button)
+        layout.addLayout(path_layout)
+        
+        self.save_config_button = QPushButton("Salvar Configurações e Testar Conexão")
+        self.save_config_button.clicked.connect(self.save_config)
+        layout.addWidget(self.save_config_button)
+
+        layout.addStretch()
+
+        # 2. Status do Piloto
+        status_widget = QWidget()
+        self.views['Status do Piloto'] = status_widget
+        self.stacked_widget.addWidget(status_widget)
+        self.menu_list.addItem("Status do Piloto")
+        self.setup_pilot_status_view(status_widget)
+
+        # 3. Sistema Atual (Estações)
+        system_widget = QWidget()
+        self.views['Sistema Atual'] = system_widget
+        self.stacked_widget.addWidget(system_widget)
+        self.menu_list.addItem("Estações")
+        self.setup_system_status_view(system_widget)
+
+        # 4. Corpos Celestes e Sinais
+        bodies_widget = QWidget()
+        self.views['Corpos Celestes'] = bodies_widget
+        self.stacked_widget.addWidget(bodies_widget)
+        self.menu_list.addItem("Corpos Celestes")
+        self.setup_bodies_view(bodies_widget)
+
+        # 5. Controle e Exportação
+        control_widget = QWidget()
+        self.views['Controle'] = control_widget
+        self.stacked_widget.addWidget(control_widget)
+        self.menu_list.addItem("Controle")
+        self.setup_control_view(control_widget)
+
+    def setup_pilot_status_view(self, status_widget):
+        """Configura a view de Status do Piloto (antiga aba)."""
+        layout = QVBoxLayout(status_widget)
+
+        # 1. Status Principal do Piloto e Nave
+        self.pilot_name_label = QLabel("Piloto: N/A")
+        self.system_label = QLabel("Sistema Atual: N/A")
+        self.ship_model_label = QLabel("Nave: N/A")
+        self.ship_name_label = QLabel("Nome/ID: N/A")
+        
+        layout.addWidget(QLabel("--- Status do Comandante ---"))
+        layout.addWidget(self.pilot_name_label)
+        layout.addWidget(self.system_label)
+        layout.addWidget(self.ship_model_label)
+        layout.addWidget(self.ship_name_label)
+        
+        # 2. Botão para Mostrar Módulos
+        layout.addWidget(QLabel("\n--- Módulos da Nave ---"))
+        self.show_modules_button = QPushButton("Mostrar Estado dos Módulos")
+        self.show_modules_button.clicked.connect(self.show_ship_modules)
+        self.show_modules_button.setEnabled(False) # Habilitado após a primeira atualização de status
+        layout.addWidget(self.show_modules_button)
+        
+        # 3. Área de exibição dos módulos (TextEdit ou Tabela)
+        self.modules_viewer = QTextEdit()
+        self.modules_viewer.setReadOnly(True)
+        self.modules_viewer.setPlaceholderText("Os módulos da nave serão exibidos aqui após clicar no botão.")
+        layout.addWidget(self.modules_viewer)
+
+        layout.addStretch()
+
+    def setup_bodies_view(self, bodies_widget):
+        """Configura a view para Corpos Celestes e Sinais."""
+        layout = QVBoxLayout(bodies_widget)
+
+        # 1. Nome do Sistema Atual (para Corpos)
+        self.current_system_bodies_label = QLabel("Sistema Atual: N/A")
+        self.current_system_bodies_label.setStyleSheet("font-weight: bold; font-size: 16px;")
+        layout.addWidget(self.current_system_bodies_label)
+
+        # 2. Botão de Atualização
+        self.update_bodies_button = QPushButton("Atualizar Corpos Celestes e Sinais")
+        self.update_bodies_button.clicked.connect(self.update_bodies_display)
+        layout.addWidget(self.update_bodies_button)
+
+        # 3. Área de exibição dos Corpos e Sinais
+        self.bodies_viewer = QTextEdit()
+        self.bodies_viewer.setReadOnly(True)
+        self.bodies_viewer.setPlaceholderText("Os corpos celestes e sinais do sistema atual serão exibidos aqui.")
+        layout.addWidget(self.bodies_viewer)
+
+        layout.addStretch()
+
+    def update_bodies_display(self):
+        """Busca e exibe os corpos celestes e sinais do sistema atual."""
+        self.bodies_viewer.clear()
+        
+        # 1. Obter o sistema atual
+        current_system = self.backend_core.get_pilot_status().get('current_system')
+        if not current_system:
+            self.bodies_viewer.setText("Erro: Não foi possível determinar o sistema atual. Inicie o monitoramento e garanta que o jogo esteja rodando.")
+            return
+
+        self.current_system_bodies_label.setText(f"Sistema Atual: {current_system}")
+
+        conn = self.backend_core.get_db_connection('db_universo')
+        if not conn:
+            self.bodies_viewer.setText("Erro: Falha na conexão com o banco de dados 'db_universo'. Verifique as configurações.")
+            return
+
+        try:
+            cursor = conn.cursor()
+            
+            # 2. Buscar Corpos Celestes
+            body_sql = """
+            SELECT body_name, body_type, distance_from_arrival_ls, is_landable, is_mapped, is_terraforming
+            FROM system_bodies
+            WHERE system_name = %s
+            ORDER BY distance_from_arrival_ls ASC
+            """
+            cursor.execute(body_sql, (current_system,))
+            bodies = cursor.fetchall()
+
+            self.bodies_viewer.append("--- CORPOS CELESTES (ESTRELAS, PLANETAS, LUAS) ---")
+            if bodies:
+                body_output = ""
+                for name, type, dist, landable, mapped, terraforming in bodies:
+                    status = []
+                    if landable: status.append("Pousável")
+                    if mapped: status.append("Mapeado")
+                    if terraforming: status.append("Terraformação")
+                    
+                    body_output += f"-> {name} ({type})\n"
+                    body_output += f"   Distância: {dist:.2f} LS | Status: {', '.join(status) if status else 'N/A'}\n"
+                self.bodies_viewer.append(body_output)
+            else:
+                self.bodies_viewer.append("Nenhum corpo celeste encontrado para este sistema. Certifique-se de ter escaneado o sistema (FSS).")
+
+            # 3. Buscar Sinais (Pontos de Interesse)
+            signal_sql = """
+            SELECT signal_name, signal_type, is_threat
+            FROM system_signals
+            WHERE system_name = %s
+            ORDER BY signal_name ASC
+            """
+            cursor.execute(signal_sql, (current_system,))
+            signals = cursor.fetchall()
+            
+            self.bodies_viewer.append("\n--- SINAIS E PONTOS DE INTERESSE ---")
+            if signals:
+                signal_output = ""
+                for name, type, threat in signals:
+                    threat_status = " (Ameaça!)" if threat else ""
+                    signal_output += f"-> {name} ({type}){threat_status}\n"
+                self.bodies_viewer.append(signal_output)
+            else:
+                self.bodies_viewer.append("Nenhum sinal ou ponto de interesse encontrado para este sistema.")
+
+        except Exception as e:
+            self.bodies_viewer.setText(f"Erro ao buscar dados de corpos celestes: {e}")
+        finally:
+            if conn and conn.is_connected():
+                conn.close()
+
+    def setup_system_status_view(self, system_widget):
+        """Configura a view de Status do Sistema Atual (antiga aba)."""
+        layout = QVBoxLayout(system_widget)
+
+        # 1. Nome do Sistema Atual
+        self.current_system_label = QLabel("Sistema Atual: N/A")
+        self.current_system_label.setStyleSheet("font-weight: bold; font-size: 16px;")
+        layout.addWidget(self.current_system_label)
+
+        # 2. Botão de Atualização
+        self.update_system_button = QPushButton("Atualizar Estações do Sistema")
+        self.update_system_button.clicked.connect(self.update_system_stations_display)
+        layout.addWidget(self.update_system_button)
+
+        # 3. Área de exibição das Estações (TextEdit ou Tabela)
+        self.stations_viewer = QTextEdit()
+        self.stations_viewer.setReadOnly(True)
+        self.stations_viewer.setPlaceholderText("As estações do sistema atual serão exibidas aqui.")
+        layout.addWidget(self.stations_viewer)
+
+        layout.addStretch()
+
+	    def setup_control_view(self, control_widget):
+	        """Configura a view de Controle e Status (antiga aba)."""
+	        layout = QVBoxLayout(control_widget)
+	
+	        self.status_label = QLabel("Status: Parado")
+	        self.status_label.setStyleSheet("font-weight: bold; color: blue;")
+	        layout.addWidget(self.status_label)
+	
+	        self.start_button = QPushButton("Iniciar Monitoramento")
+	        self.start_button.clicked.connect(self.start_monitoring)
+	        self.start_button.setEnabled(False) # Desabilitado até a configuração ser salva
+	
+	        self.stop_button = QPushButton("Parar Monitoramento")
+	        self.stop_button.clicked.connect(self.stop_monitoring)
+	        self.stop_button.setEnabled(False)
+	
+	        h_layout = QHBoxLayout()
+	        h_layout.addWidget(self.start_button)
+	        h_layout.addWidget(self.stop_button)
+	        layout.addLayout(h_layout)
+	
+	        # Botão de Exportar CSV (Implementado na Fase 5)
+	        self.export_button = QPushButton("Exportar Dados para CSV")
+	        self.export_button.setEnabled(True)
+	        self.export_button.clicked.connect(self.prompt_csv_export)
+	        layout.addWidget(self.export_button)
+	
+	        layout.addStretch()
+
+    @Slot(str)
+    def update_log_viewer(self, text):
+        """Atualiza o visualizador de log com novas mensagens."""
+        self.log_viewer.append(text)
+
+    def update_status(self, text, is_running=False):
+        """Atualiza o label de status."""
+        self.status_label.setText(f"Status: {text}")
+        if is_running:
+            self.status_label.setStyleSheet("font-weight: bold; color: green;")
+        else:
+            self.status_label.setStyleSheet("font-weight: bold; color: blue;")
+
+    def browse_journal_path(self):
+        """Abre a caixa de diálogo para selecionar o diretório do Journal."""
+        directory = QFileDialog.getExistingDirectory(self, "Selecione o Diretório do Elite Dangerous Journal")
+        if directory:
+            self.journal_path_input.setText(directory)
+
+    def save_config(self):
+        """Salva as configurações e testa a conexão com o banco de dados."""
+        new_db_config = {
+            'host': self.mysql_host.text(),
+            'user': self.mysql_user.text(),
+            'password': self.mysql_pass.text(),
+        }
+        new_journal_dir = self.journal_path_input.text()
+        
+        # Cria um novo BackendCore com as novas configurações
+        temp_core = BackendCore(new_db_config, new_journal_dir)
+        
+        # Testa a conexão com o db_piloto (apenas para verificar credenciais)
+        conn = temp_core.get_db_connection('db_piloto')
+        if conn:
+            QMessageBox.information(self, "Configuração Salva", "Conexão com o MySQL bem-sucedida! Configurações salvas.")
+            conn.close()
+            
+            # Atualiza o core principal e habilita o botão Iniciar
+            self.backend_core = temp_core
+            self.start_button.setEnabled(True)
+            # Os botões estão agora nas views, mas a lógica de habilitação deve ser mantida
+            # self.show_modules_button.setEnabled(True) # Habilitado após a primeira atualização de status
+            self.update_status("Configuração salva. Pronto para iniciar o monitoramento.")
+            self.update_pilot_status_display() # Tenta carregar o status inicial do DB
+        else:
+            QMessageBox.critical(self, "Erro de Conexão", "Falha ao conectar ao MySQL. Verifique as credenciais e se o servidor está rodando.")
+            self.start_button.setEnabled(False)
+
+    def start_monitoring(self):
+        """Inicia o monitoramento em uma thread separada."""
+        if self.backend_core.is_running:
+            return
+
+        self.backend_thread = QThread()
+        self.backend_worker = BackendWorker(self.backend_core)
+        self.backend_worker.moveToThread(self.backend_thread)
+
+        self.backend_thread.started.connect(self.backend_worker.run)
+        self.backend_worker.finished.connect(self.backend_thread.quit)
+        self.backend_worker.finished.connect(self.backend_worker.deleteLater)
+        self.backend_thread.finished.connect(self.backend_thread.deleteLater)
+        self.backend_worker.error.connect(lambda e: QMessageBox.critical(self, "Erro de Execução", e))
+        
+        self.backend_thread.start()
+        
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.update_status("Monitoramento em execução...", is_running=True)
+        logging.info("GUI: Monitoramento iniciado.")
+
+    def stop_monitoring(self):
+        """Para o monitoramento."""
+        if not self.backend_core.is_running:
+            return
+            
+        self.backend_core.stop_monitoring()
+        
+        # Espera a thread terminar (opcional, mas mais limpo)
+        if self.backend_thread and self.backend_thread.isRunning():
+            self.backend_thread.quit()
+            self.backend_thread.wait(2000) # Espera no máximo 2 segundos
+
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.update_status("Monitoramento parado.")
+        logging.info("GUI: Monitoramento parado.")
+
+    def show_ship_modules(self):
+        """Consulta e exibe o estado dos módulos da nave."""
+        self.modules_viewer.clear()
+        
+        # 1. Obter o ShipID atual
+        conn = self.backend_core.get_db_connection('db_piloto')
+        if not conn:
+            self.modules_viewer.setText("Erro: Não foi possível conectar ao banco de dados.")
+            return
+
+        try:
+            cursor = conn.cursor()
+            # Assume que o ShipID atual é o único na tabela pilot_status (ou o mais recente)
+            cursor.execute("SELECT ship_id FROM pilot_status ORDER BY updated_at DESC LIMIT 1")
+            result = cursor.fetchone()
+            
+            if not result or not result[0]:
+                self.modules_viewer.setText("Nenhuma informação de nave encontrada na base de dados.")
+                return
+                
+            ship_id = result[0]
+            
+            # 2. Consultar os módulos
+            sql = """
+            SELECT slot, module_name, module_class, module_rating, health
+            FROM ship_modules
+            WHERE ship_id = %s
+            ORDER BY slot
+            """
+            cursor.execute(sql, (ship_id,))
+            modules = cursor.fetchall()
+            
+            if not modules:
+                self.modules_viewer.setText(f"Nenhum módulo encontrado para a nave (ShipID: {ship_id}).")
+                return
+
+            # 3. Formatar a saída
+            output = ["**Estado dos Módulos (ShipID: {})**\n".format(ship_id)]
+            output.append("{:<30} {:<30} {:<10} {:<10}".format("Slot", "Módulo", "Classe/Rating", "Saúde (%)"))
+            output.append("-" * 80)
+            
+            for slot, name, class_val, rating, health in modules:
+                health_percent = f"{health * 100:.1f}%"
+                class_rating = f"{class_val or ''}{rating or ''}"
+                output.append("{:<30} {:<30} {:<10} {:<10}".format(slot, name, class_rating, health_percent))
+                
+            self.modules_viewer.setText("\n".join(output))
+
+        except Exception as e:
+            self.modules_viewer.setText(f"Erro ao consultar módulos: {e}")
+        finally:
+            if conn and conn.is_connected():
+                cursor.close()
+                conn.close()
+
+    def update_pilot_status_display(self):
+        """Consulta o pilot_status mais recente e atualiza os labels na GUI."""
+        conn = self.backend_core.get_db_connection('db_piloto')
+        if not conn:
+            return
+
+        try:
+            cursor = conn.cursor()
+            sql = """
+            SELECT commander_name, current_system, ship_model, ship_name, ship_ident
+            FROM pilot_status
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """
+            cursor.execute(sql)
+            result = cursor.fetchone()
+            
+            if result:
+                name, system, model, ship_name, ship_ident = result
+                self.pilot_name_label.setText(f"Piloto: {name or 'N/A'}")
+                self.system_label.setText(f"Sistema Atual: {system or 'N/A'}")
+                self.ship_model_label.setText(f"Nave: {model or 'N/A'}")
+                
+                name_ident = f"{ship_name or 'N/A'} ({ship_ident or 'N/A'})"
+                self.ship_name_label.setText(f"Nome/ID: {name_ident}")
+                self.show_modules_button.setEnabled(True)
+                self.current_system_label.setText(f"Sistema Atual: {system or 'N/A'}") # Atualiza o label na aba de sistema
+            else:
+                self.pilot_name_label.setText("Piloto: N/A (Aguardando primeiro evento Location/FSDJump)")
+                self.show_modules_button.setEnabled(False)
+                self.current_system_label.setText("Sistema Atual: N/A")
+
+        except Exception as e:
+            logging.error(f"Erro ao atualizar display de status: {e}")
+        finally:
+            if conn and conn.is_connected():
+                cursor.close()
+                conn.close()
+
+    def update_system_stations_display(self):
+        """Consulta o sistema atual e exibe a lista de estações."""
+        self.stations_viewer.clear()
+        
+        # 1. Obter o nome do sistema atual (da tabela pilot_status)
+        conn_piloto = self.backend_core.get_db_connection('db_piloto')
+        if not conn_piloto:
+            self.stations_viewer.setText("Erro: Não foi possível conectar ao banco de dados do piloto.")
+            return
+
+        try:
+            cursor_piloto = conn_piloto.cursor()
+            cursor_piloto.execute("SELECT current_system FROM pilot_status ORDER BY updated_at DESC LIMIT 1")
+            result = cursor_piloto.fetchone()
+            
+            if not result or not result[0]:
+                self.stations_viewer.setText("Sistema atual desconhecido. Por favor, inicie o monitoramento e realize um FSD Jump.")
+                return
+                
+            system_name = result[0]
+            self.current_system_label.setText(f"Sistema Atual: {system_name}")
+            
+        except Exception as e:
+            self.stations_viewer.setText(f"Erro ao obter o nome do sistema atual: {e}")
+            return
+        finally:
+            if conn_piloto and conn_piloto.is_connected():
+                cursor_piloto.close()
+                conn_piloto.close()
+
+        # 2. Consultar as estações no db_universo
+        conn_universo = self.backend_core.get_db_connection('db_universo')
+        if not conn_universo:
+            self.stations_viewer.setText("Erro: Não foi possível conectar ao banco de dados do universo.")
+            return
+
+        try:
+            cursor_universo = conn_universo.cursor()
+            sql = """
+            SELECT station_name, station_type, distance_from_star
+            FROM stations
+            WHERE system_name = %s
+            ORDER BY distance_from_star ASC
+            """
+            cursor_universo.execute(sql, (system_name,))
+            stations = cursor_universo.fetchall()
+            
+            if not stations:
+                self.stations_viewer.setText(f"Nenhuma estação conhecida no sistema {system_name}.")
+                return
+
+            # 3. Formatar a saída
+            output = [f"**Estações Conhecidas em {system_name}**\n"]
+            output.append("{:<30} {:<25} {:<15}".format("Estação", "Tipo", "Distância (LS)"))
+            output.append("-" * 70)
+            
+            for name, type_val, distance in stations:
+                distance_str = f"{distance:.1f}" if distance is not None else "N/A"
+                output.append("{:<30} {:<25} {:<15}".format(name, type_val or "Desconhecido", distance_str))
+                
+            self.stations_viewer.setText("\n".join(output))
+
+        except Exception as e:
+            self.stations_viewer.setText(f"Erro ao consultar estações: {e}")
+        finally:
+            if conn_universo and conn_universo.is_connected():
+                cursor_universo.close()
+                conn_universo.close()
+
+    def prompt_csv_export(self):
+        """Solicita o diretório e inicia a exportação CSV."""
+        if not self.backend_core.DB_CONFIG.get('user'):
+            QMessageBox.warning(self, "Configuração Pendente", "Salve as configurações do MySQL na aba 'Configuração' antes de exportar.")
+            return
+
+        export_dir = QFileDialog.getExistingDirectory(self, "Selecione o Diretório de Destino para CSV")
+        if not export_dir:
+            return
+
+        self.export_button.setEnabled(False)
+        self.update_status("Exportando dados para CSV...")
+        
+        # Cria e executa o worker de exportação em uma thread separada
+        self.export_thread = QThread()
+        self.export_worker = CSVExportWorker(self.backend_core.DB_CONFIG, export_dir)
+        self.export_worker.moveToThread(self.export_thread)
+
+        self.export_thread.started.connect(self.export_worker.run)
+        self.export_worker.finished.connect(self.export_thread.quit)
+        self.export_worker.finished.connect(self.export_finished)
+        self.export_worker.finished.connect(self.export_worker.deleteLater)
+        self.export_thread.finished.connect(self.export_thread.deleteLater)
+        self.export_worker.error.connect(lambda e: QMessageBox.critical(self, "Erro de Exportação", e))
+        
+        self.export_thread.start()
+        
+    @Slot()
+    def export_finished(self):
+        """Chamado quando a exportação CSV termina."""
+        self.export_button.setEnabled(True)
+        self.update_status("Exportação CSV concluída.", is_running=self.backend_core.is_running)
+        QMessageBox.information(self, "Exportação Concluída", "Todos os dados foram exportados para CSV com sucesso!")
+
+class CSVExportWorker(QObject):
+    """Worker para rodar a exportação CSV em uma thread separada."""
+    
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, db_config, output_dir):
+        super().__init__()
+        self.db_config = db_config
+        self.output_dir = output_dir
+
+    @Slot()
+    def run(self):
+        """Executa a exportação CSV."""
+        try:
+            exporter = CSVExporter(self.db_config)
+            exporter.export_all_data(self.output_dir)
+        except Exception as e:
+            self.error.emit(f"Erro durante a exportação CSV: {e}")
+        finally:
+            self.finished.emit()
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+
