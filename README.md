@@ -1,7 +1,7 @@
-# Elite Log Tracker (ELT)
+# Elite Dangerous Log Tracker (EDLT)
 
 ## Visão Geral
-O **Elite Log Tracker (ELT)** é um software cross-platform (Windows/Linux) com interface gráfica (GUI) desenvolvido em Python e PySide6 (Qt) para monitorar em tempo real os logs de diário (Journal files) do jogo Elite Dangerous e integrar dados de APIs externas (como EDDN). 
+O **Elite Dangerous Log Tracker (EDLT)** é um software cross-platform (Windows/Linux) com interface gráfica (GUI) desenvolvido em Python e PySide6 (Qt) para monitorar em tempo real os logs de diário (Journal files) do jogo Elite Dangerous e integrar dados de APIs externas (como EDDN). 
 
 O objetivo principal é persistir todos os dados coletados em um banco de dados **MySQL** e permitir a exportação para arquivos **CSV**, mantendo uma separação lógica entre dados do **Piloto** e dados do **Universo**.
 
@@ -14,7 +14,7 @@ O objetivo principal é persistir todos os dados coletados em um banco de dados 
 
 ## Pré-requisitos
 
-Para rodar o ELT, você precisará dos seguintes componentes instalados e configurados:
+Para rodar o EDLT, você precisará dos seguintes componentes instalados e configurados:
 
 1.  **Python 3.x:** A linguagem de programação principal.
 2.  **MySQL Server:** O banco de dados para persistência dos dados.
