@@ -53,7 +53,7 @@ class BackendWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Elite Dangerous Data Collector")
+        self.setWindowTitle("Elite Log Tracker (ELT)")
         self.setGeometry(100, 100, 800, 600)
         
         # Configura o logger para a GUI
