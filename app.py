@@ -4,89 +4,25 @@ import logging
 import threading
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTextEdit, QLineEdit, QLabel, QTabWidget, QFileDialog,
-    QMessageBox
+    QPushButton, QTextEdit, QLineEdit, QLabel, QListWidget, QStackedWidget, QFileDialog,
+    QMessageBox, QListWidgetItem
 )
 from PySide6.QtCore import QObject, Signal, Slot, QThread, Qt
 
 # Adiciona o diretório do backend ao path para importação
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'backend')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
 
 # Importa o core do backend
 from main import BackendCore, JOURNAL_DIR, DB_CONFIG
 from csv_exporter import CSVExporter
 
-# Configuração de Logging para capturar logs no GUI
-class LogSignalHandler(logging.Handler, QObject):
-    """Handler de log que emite um sinal para o GUI."""
-    log_record_signal = Signal(str)
+# --- Classes de Visualização (Views) ---
 
+class ConfigView(QWidget):
+    """Visualização para configurar o MySQL e o caminho do Journal."""
     def __init__(self, parent=None):
-        QObject.__init__(self, parent)
-        logging.Handler.__init__(self)
-        self.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-
-    def emit(self, record):
-        msg = self.format(record)
-        self.log_record_signal.emit(msg)
-
-class BackendWorker(QObject):
-    """Worker para rodar o BackendCore em uma thread separada."""
-    
-    finished = Signal()
-    error = Signal(str)
-
-    def __init__(self, backend_core):
-        super().__init__()
-        self.backend_core = backend_core
-
-    @Slot()
-    def run(self):
-        """Inicia o monitoramento do backend."""
-        try:
-            self.backend_core.start_monitoring()
-        except Exception as e:
-            self.error.emit(f"Erro fatal no backend: {e}")
-        finally:
-            self.finished.emit()
-
-class MainWindow(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Elite Dangerous Log Tracker (EDLT)")
-        self.setGeometry(100, 100, 800, 600)
-        
-        # Configura o logger para a GUI
-        self.log_handler = LogSignalHandler()
-        self.log_handler.log_record_signal.connect(self.update_log_viewer)
-        logging.getLogger().addHandler(self.log_handler)
-        logging.getLogger().setLevel(logging.INFO)
-
-        # Inicializa o Core do Backend (com configurações padrão/placeholder)
-        self.backend_core = BackendCore(DB_CONFIG, JOURNAL_DIR)
-        self.backend_thread = None
-        self.backend_worker = None
-
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-        self.main_layout = QVBoxLayout(self.central_widget)
-
-        self.tab_widget = QTabWidget()
-        self.main_layout.addWidget(self.tab_widget)
-
-        self.setup_config_tab()
-        self.setup_control_tab()
-
-        self.log_viewer = QTextEdit()
-        self.log_viewer.setReadOnly(True)
-        self.main_layout.addWidget(QLabel("Log de Eventos:"))
-        self.main_layout.addWidget(self.log_viewer)
-        
-        self.update_status("Pronto para configurar e iniciar.")
-
-    def setup_config_tab(self):
-        config_widget = QWidget()
-        layout = QVBoxLayout(config_widget)
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
 
         # Configuração do MySQL
         layout.addWidget(QLabel("--- Configuração MySQL ---"))
@@ -107,7 +43,6 @@ class MainWindow(QMainWindow):
         self.journal_path_input.setPlaceholderText("Ex: C:\\Users\\SeuUsuario\\Saved Games\\Frontier Developments\\Elite Dangerous")
         
         self.browse_button = QPushButton("Procurar Diretório")
-        self.browse_button.clicked.connect(self.browse_journal_path)
         
         path_layout = QHBoxLayout()
         path_layout.addWidget(self.journal_path_input)
@@ -115,26 +50,24 @@ class MainWindow(QMainWindow):
         layout.addLayout(path_layout)
         
         self.save_config_button = QPushButton("Salvar Configurações e Testar Conexão")
-        self.save_config_button.clicked.connect(self.save_config)
         layout.addWidget(self.save_config_button)
 
         layout.addStretch()
-        self.tab_widget.addTab(config_widget, "Configuração")
 
-    def setup_control_tab(self):
-        control_widget = QWidget()
-        layout = QVBoxLayout(control_widget)
+class ControlView(QWidget):
+    """Visualização para controlar o monitoramento e exportação."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
 
         self.status_label = QLabel("Status: Parado")
         self.status_label.setStyleSheet("font-weight: bold; color: blue;")
         layout.addWidget(self.status_label)
 
         self.start_button = QPushButton("Iniciar Monitoramento")
-        self.start_button.clicked.connect(self.start_monitoring)
         self.start_button.setEnabled(False) # Desabilitado até a configuração ser salva
 
         self.stop_button = QPushButton("Parar Monitoramento")
-        self.stop_button.clicked.connect(self.stop_monitoring)
         self.stop_button.setEnabled(False)
 
         h_layout = QHBoxLayout()
@@ -142,62 +75,167 @@ class MainWindow(QMainWindow):
         h_layout.addWidget(self.stop_button)
         layout.addLayout(h_layout)
 
-        # Botão de Exportar CSV (Implementado na Fase 5)
         self.export_button = QPushButton("Exportar Dados para CSV")
         self.export_button.setEnabled(True)
-        self.export_button.clicked.connect(self.prompt_csv_export)
         layout.addWidget(self.export_button)
 
         layout.addStretch()
-        self.tab_widget.addTab(control_widget, "Controle e Status")
+
+# --- Handlers e Workers ---
+
+class LogSignalHandler(logging.Handler, QObject):
+    log_record_signal = Signal(str)
+
+    def __init__(self, parent=None):
+        QObject.__init__(self, parent)
+        logging.Handler.__init__(self)
+        self.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.log_record_signal.emit(msg)
+
+class BackendWorker(QObject):
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, backend_core):
+        super().__init__()
+        self.backend_core = backend_core
+
+    @Slot()
+    def run(self):
+        try:
+            self.backend_core.start_monitoring()
+        except Exception as e:
+            self.error.emit(f"Erro fatal no backend: {e}")
+        finally:
+            self.finished.emit()
+
+class CSVExportWorker(QObject):
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(self, db_config, output_dir):
+        super().__init__()
+        self.db_config = db_config
+        self.output_dir = output_dir
+
+    @Slot()
+    def run(self):
+        try:
+            exporter = CSVExporter(self.db_config)
+            exporter.export_all_data(self.output_dir)
+        except Exception as e:
+            self.error.emit(f"Erro durante a exportação CSV: {e}")
+        finally:
+            self.finished.emit()
+
+# --- Janela Principal ---
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Elite Dangerous Log Tracker (EDLT)")
+        self.setGeometry(100, 100, 900, 700)
+        
+        self.log_handler = LogSignalHandler()
+        self.log_handler.log_record_signal.connect(self.update_log_viewer)
+        logging.getLogger().addHandler(self.log_handler)
+        logging.getLogger().setLevel(logging.INFO)
+
+        self.backend_core = BackendCore(DB_CONFIG, JOURNAL_DIR)
+        self.backend_thread = None
+        self.backend_worker = None
+
+        self.setup_ui()
+        self.connect_signals()
+        
+        self.update_status("Pronto para configurar e iniciar.")
+
+    def setup_ui(self):
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+        self.main_layout = QHBoxLayout(self.central_widget)
+
+        # Menu Lateral
+        self.nav_menu = QListWidget()
+        self.nav_menu.setFixedWidth(150)
+        self.main_layout.addWidget(self.nav_menu)
+
+        # Conteúdo Empilhado (Stacked Widget)
+        self.stacked_widget = QStackedWidget()
+        self.main_layout.addWidget(self.stacked_widget)
+
+        # Adiciona as visualizações
+        self.config_view = ConfigView()
+        self.control_view = ControlView()
+        
+        self.stacked_widget.addWidget(self.config_view)
+        self.stacked_widget.addWidget(self.control_view)
+
+        self.nav_menu.addItem("Configuração")
+        self.nav_menu.addItem("Controle")
+
+        # Log Viewer (agora parte do layout principal)
+        log_layout = QVBoxLayout()
+        self.log_viewer = QTextEdit()
+        self.log_viewer.setReadOnly(True)
+        log_layout.addWidget(QLabel("Log de Eventos:"))
+        log_layout.addWidget(self.log_viewer)
+        self.main_layout.addLayout(log_layout)
+
+    def connect_signals(self):
+        self.nav_menu.currentRowChanged.connect(self.stacked_widget.setCurrentIndex)
+        
+        # Sinais da ConfigView
+        self.config_view.browse_button.clicked.connect(self.browse_journal_path)
+        self.config_view.save_config_button.clicked.connect(self.save_config)
+
+        # Sinais da ControlView
+        self.control_view.start_button.clicked.connect(self.start_monitoring)
+        self.control_view.stop_button.clicked.connect(self.stop_monitoring)
+        self.control_view.export_button.clicked.connect(self.prompt_csv_export)
 
     @Slot(str)
     def update_log_viewer(self, text):
-        """Atualiza o visualizador de log com novas mensagens."""
         self.log_viewer.append(text)
 
     def update_status(self, text, is_running=False):
-        """Atualiza o label de status."""
-        self.status_label.setText(f"Status: {text}")
+        self.control_view.status_label.setText(f"Status: {text}")
         if is_running:
-            self.status_label.setStyleSheet("font-weight: bold; color: green;")
+            self.control_view.status_label.setStyleSheet("font-weight: bold; color: green;")
         else:
-            self.status_label.setStyleSheet("font-weight: bold; color: blue;")
+            self.control_view.status_label.setStyleSheet("font-weight: bold; color: blue;")
 
     def browse_journal_path(self):
-        """Abre a caixa de diálogo para selecionar o diretório do Journal."""
         directory = QFileDialog.getExistingDirectory(self, "Selecione o Diretório do Elite Dangerous Journal")
         if directory:
-            self.journal_path_input.setText(directory)
+            self.config_view.journal_path_input.setText(directory)
 
     def save_config(self):
-        """Salva as configurações e testa a conexão com o banco de dados."""
         new_db_config = {
-            'host': self.mysql_host.text(),
-            'user': self.mysql_user.text(),
-            'password': self.mysql_pass.text(),
+            "host": self.config_view.mysql_host.text(),
+            "user": self.config_view.mysql_user.text(),
+            "password": self.config_view.mysql_pass.text(),
         }
-        new_journal_dir = self.journal_path_input.text()
+        new_journal_dir = self.config_view.journal_path_input.text()
         
-        # Cria um novo BackendCore com as novas configurações
         temp_core = BackendCore(new_db_config, new_journal_dir)
         
-        # Testa a conexão com o db_piloto (apenas para verificar credenciais)
-        conn = temp_core.get_db_connection('db_piloto')
+        conn = temp_core.get_db_connection("db_piloto")
         if conn:
             QMessageBox.information(self, "Configuração Salva", "Conexão com o MySQL bem-sucedida! Configurações salvas.")
             conn.close()
             
-            # Atualiza o core principal e habilita o botão Iniciar
             self.backend_core = temp_core
-            self.start_button.setEnabled(True)
+            self.control_view.start_button.setEnabled(True)
             self.update_status("Configuração salva. Pronto para iniciar o monitoramento.")
         else:
             QMessageBox.critical(self, "Erro de Conexão", "Falha ao conectar ao MySQL. Verifique as credenciais e se o servidor está rodando.")
-            self.start_button.setEnabled(False)
+            self.control_view.start_button.setEnabled(False)
 
     def start_monitoring(self):
-        """Inicia o monitoramento em uma thread separada."""
         if self.backend_core.is_running:
             return
 
@@ -213,42 +251,38 @@ class MainWindow(QMainWindow):
         
         self.backend_thread.start()
         
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
+        self.control_view.start_button.setEnabled(False)
+        self.control_view.stop_button.setEnabled(True)
         self.update_status("Monitoramento em execução...", is_running=True)
         logging.info("GUI: Monitoramento iniciado.")
 
     def stop_monitoring(self):
-        """Para o monitoramento."""
         if not self.backend_core.is_running:
             return
             
         self.backend_core.stop_monitoring()
         
-        # Espera a thread terminar (opcional, mas mais limpo)
         if self.backend_thread and self.backend_thread.isRunning():
             self.backend_thread.quit()
-            self.backend_thread.wait(2000) # Espera no máximo 2 segundos
+            self.backend_thread.wait(2000)
 
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self.control_view.start_button.setEnabled(True)
+        self.control_view.stop_button.setEnabled(False)
         self.update_status("Monitoramento parado.")
         logging.info("GUI: Monitoramento parado.")
 
     def prompt_csv_export(self):
-        """Solicita o diretório e inicia a exportação CSV."""
-        if not self.backend_core.DB_CONFIG.get('user'):
-            QMessageBox.warning(self, "Configuração Pendente", "Salve as configurações do MySQL na aba 'Configuração' antes de exportar.")
+        if not self.backend_core.DB_CONFIG.get("user"):
+            QMessageBox.warning(self, "Configuração Pendente", "Salve as configurações do MySQL antes de exportar.")
             return
 
         export_dir = QFileDialog.getExistingDirectory(self, "Selecione o Diretório de Destino para CSV")
         if not export_dir:
             return
 
-        self.export_button.setEnabled(False)
+        self.control_view.export_button.setEnabled(False)
         self.update_status("Exportando dados para CSV...")
         
-        # Cria e executa o worker de exportação em uma thread separada
         self.export_thread = QThread()
         self.export_worker = CSVExportWorker(self.backend_core.DB_CONFIG, export_dir)
         self.export_worker.moveToThread(self.export_thread)
@@ -264,36 +298,12 @@ class MainWindow(QMainWindow):
         
     @Slot()
     def export_finished(self):
-        """Chamado quando a exportação CSV termina."""
-        self.export_button.setEnabled(True)
+        self.control_view.export_button.setEnabled(True)
         self.update_status("Exportação CSV concluída.", is_running=self.backend_core.is_running)
         QMessageBox.information(self, "Exportação Concluída", "Todos os dados foram exportados para CSV com sucesso!")
 
-class CSVExportWorker(QObject):
-    """Worker para rodar a exportação CSV em uma thread separada."""
-    
-    finished = Signal()
-    error = Signal(str)
-
-    def __init__(self, db_config, output_dir):
-        super().__init__()
-        self.db_config = db_config
-        self.output_dir = output_dir
-
-    @Slot()
-    def run(self):
-        """Executa a exportação CSV."""
-        try:
-            exporter = CSVExporter(self.db_config)
-            exporter.export_all_data(self.output_dir)
-        except Exception as e:
-            self.error.emit(f"Erro durante a exportação CSV: {e}")
-        finally:
-            self.finished.emit()
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec())
-
+    sys.exit(app.exec()

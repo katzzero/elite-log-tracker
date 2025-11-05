@@ -47,7 +47,7 @@ Você deve criar os bancos de dados e tabelas usando o esquema fornecido.
 
 ### 2. Instalação das Dependências Python
 
-1.  **Navegue até o diretório `ed_data_collector`** onde o arquivo `requirements.txt` está localizado.
+1.  **Navegue até o diretório `elite-log-tracker`** onde o arquivo `requirements.txt` está localizado.
 2.  **Instale as dependências** usando `pip`:
     ```bash
     pip install -r requirements.txt
@@ -63,17 +63,17 @@ Você precisará desse caminho para configurar o aplicativo na GUI.
 
 ## Uso do Aplicativo
 
-1.  **Inicie o aplicativo** executando o script `run_app.py`:
+1.  **Inicie o aplicativo** executando o script `app.py`:
     ```bash
-    python run_app.py
+    python app.py
     ```
 
-2.  **Aba "Configuração":**
+2.  **Visualização "Configuração":**
     *   Preencha os campos de **Host, Usuário e Senha** do MySQL (padrão: `localhost`, `ed_user`, `ed_password`).
     *   Use o botão **"Procurar Diretório"** para selecionar o caminho dos logs de diário do Elite Dangerous.
     *   Clique em **"Salvar Configurações e Testar Conexão"**. Uma mensagem de sucesso deve aparecer. Se houver erro, verifique se o MySQL está rodando e se as credenciais estão corretas.
 
-3.  **Aba "Controle e Status":**
+3.  **Visualização "Controle":**
     *   O botão **"Iniciar Monitoramento"** será habilitado após salvar as configurações.
     *   Clique em **"Iniciar Monitoramento"** para começar a ler o arquivo de diário em tempo real.
     *   O **"Log de Eventos"** na parte inferior da janela mostrará as mensagens de sucesso para cada evento de diário processado e inserido no MySQL.
@@ -86,16 +86,12 @@ Você precisará desse caminho para configurar o aplicativo na GUI.
 ## Estrutura do Projeto
 
 ```
-ed_data_collector/
+elite-log-tracker/
 ├── README.md               # Este arquivo.
 ├── requirements.txt        # Dependências Python.
 ├── mysql_schema.sql        # Script para criação das tabelas MySQL.
-├── run_app.py              # Script principal para iniciar a GUI.
-├── backend/
-│   ├── __init__.py
-│   ├── main.py             # Core do Backend (Monitoramento de Logs e Persistência MySQL).
-│   ├── eddn_client.py      # Lógica de integração com a API EDDN (Placeholder).
-│   └── csv_exporter.py     # Lógica para exportação de dados para CSV.
-└── gui/
-    └── app.py              # Interface Gráfica (PySide6).
+├── app.py                  # Interface Gráfica (PySide6).
+├── main.py                 # Core do Backend (Monitoramento de Logs e Persistência MySQL).
+├── eddn_client.py          # Lógica de integração com a API EDDN (Placeholder).
+└── csv_exporter.py         # Lógica para exportação de dados para CSV.
 ```
