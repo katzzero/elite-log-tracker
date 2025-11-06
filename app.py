@@ -5,9 +5,10 @@ import threading
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QLineEdit, QLabel, QListWidget, QStackedWidget, QFileDialog,
-    QMessageBox, QListWidgetItem
+    QMessageBox, QListWidgetItem, QGridLayout, QProgressBar
 )
 from PySide6.QtCore import QObject, Signal, Slot, QThread, Qt
+from PySide6.QtGui import QFont
 
 # Adiciona o diretório do backend ao path para importação
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
@@ -15,6 +16,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
 # Importa o core do backend
 from main import BackendCore, JOURNAL_DIR, DB_CONFIG
 from csv_exporter import CSVExporter
+from backend.rank_data import RANK_NAMES, PILOTS__FEDERATION_RANKS, SUPERPOWER_RANKS
 
 # --- Classes de Visualização (Views) ---
 
@@ -80,6 +82,99 @@ class ControlView(QWidget):
         layout.addWidget(self.export_button)
 
         layout.addStretch()
+
+class PilotRanksView(QWidget):
+    """Visualização para exibir o status e progresso dos ranques do piloto."""
+    def __init__(self, backend_core, parent=None):
+        super().__init__(parent)
+        self.backend_core = backend_core
+        self.rank_labels = {}
+        self.progress_bars = {}
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        title = QLabel("Status de Ranques do Piloto")
+        title.setFont(QFont("Arial", 16, QFont.Bold))
+        layout.addWidget(title)
+        
+        self.update_button = QPushButton("Atualizar Ranques")
+        layout.addWidget(self.update_button)
+        
+        self.grid_layout = QGridLayout()
+        
+        # Cabeçalhos
+        self.grid_layout.addWidget(QLabel("Tipo de Ranque"), 0, 0, Qt.AlignmentFlag.AlignLeft)
+        self.grid_layout.addWidget(QLabel("Ranque Atual"), 0, 1, Qt.AlignmentFlag.AlignLeft)
+        self.grid_layout.addWidget(QLabel("Progresso para o Próximo"), 0, 2, Qt.AlignmentFlag.AlignLeft)
+        
+        row = 1
+        for rank_type in PILOTS__FEDERATION_RANKS + SUPERPOWER_RANKS:
+            # Label do Tipo de Ranque
+            self.grid_layout.addWidget(QLabel(rank_type), row, 0, Qt.AlignmentFlag.AlignLeft)
+            
+            # Label do Ranque Atual
+            self.rank_labels[rank_type] = QLabel("N/A")
+            self.grid_layout.addWidget(self.rank_labels[rank_type], row, 1, Qt.AlignmentFlag.AlignLeft)
+            
+            # Barra de Progresso
+            self.progress_bars[rank_type] = QProgressBar()
+            self.progress_bars[rank_type].setFormat("%p%")
+            self.progress_bars[rank_type].setValue(0)
+            self.grid_layout.addWidget(self.progress_bars[rank_type], row, 2)
+            
+            row += 1
+            
+        layout.addLayout(self.grid_layout)
+        layout.addStretch()
+        
+        self.update_button.clicked.connect(self.update_ranks_display)
+
+    @Slot()
+    def update_ranks_display(self):
+        conn = self.backend_core.get_db_connection('db_piloto')
+        if not conn:
+            QMessageBox.critical(self, "Erro de Conexão", "Não foi possível conectar ao banco de dados para buscar os ranques.")
+            return
+
+        try:
+            cursor = conn.cursor(dictionary=True)
+            sql = "SELECT rank_type, rank_value, rank_progress FROM pilot_ranks"
+            cursor.execute(sql)
+            ranks_data = {row['rank_type']: row for row in cursor.fetchall()}
+            
+            for rank_type in PILOTS__FEDERATION_RANKS + SUPERPOWER_RANKS:
+                data = ranks_data.get(rank_type)
+                
+                if data:
+                    rank_value = data['rank_value']
+                    progress = data['rank_progress'] # 0.0 a 1.0
+                    
+                    # Ranque Atual (Nome)
+                    rank_name = RANK_NAMES.get(rank_type, ["N/A"])[rank_value]
+                    self.rank_labels[rank_type].setText(rank_name)
+                    
+                    # Progresso (Barra)
+                    progress_percent = int(progress * 100)
+                    self.progress_bars[rank_type].setValue(progress_percent)
+                    
+                    # Para ranques de Superpotência, o progresso é apenas o percentual para o próximo nível
+                    if rank_type in SUPERPOWER_RANKS:
+                        self.progress_bars[rank_type].setFormat(f"{progress_percent}% para {RANK_NAMES[rank_type][rank_value + 1] if rank_value + 1 < len(RANK_NAMES[rank_type]) else 'Máximo'}")
+                    else:
+                        self.progress_bars[rank_type].setFormat(f"{progress_percent}%")
+                else:
+                    self.rank_labels[rank_type].setText("N/A")
+                    self.progress_bars[rank_type].setValue(0)
+                    self.progress_bars[rank_type].setFormat("N/A")
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "Erro de Consulta", f"Erro ao buscar dados de ranques: {e}")
+        finally:
+            if conn and conn.is_connected():
+                cursor.close()
+                conn.close()
 
 # --- Handlers e Workers ---
 
@@ -170,12 +265,15 @@ class MainWindow(QMainWindow):
         # Adiciona as visualizações
         self.config_view = ConfigView()
         self.control_view = ControlView()
+        self.pilot_ranks_view = PilotRanksView(self.backend_core) # Nova Visualização
         
         self.stacked_widget.addWidget(self.config_view)
         self.stacked_widget.addWidget(self.control_view)
+        self.stacked_widget.addWidget(self.pilot_ranks_view) # Adiciona a nova visualização
 
         self.nav_menu.addItem("Configuração")
         self.nav_menu.addItem("Controle")
+        self.nav_menu.addItem("Ranques do Piloto") # Adiciona item ao menu
 
         # Log Viewer (agora parte do layout principal)
         log_layout = QVBoxLayout()
@@ -306,4 +404,4 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec()
+    sys.exit(app.exec())

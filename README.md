@@ -12,6 +12,7 @@ O objetivo principal é persistir todos os dados coletados em um banco de dados 
 *   **Persistência em MySQL:** Armazena os dados em dois bancos de dados separados (`db_piloto` e `db_universo`) para organização e análise.
 *   **Integração com API (EDDN):** Preparado para receber dados do Elite Dangerous Data Network (EDDN) para informações de mercado e universo (Nota: A integração real com EDDN requer bibliotecas ZeroMQ e é um placeholder no código devido à complexidade de ambiente).
 *   **Interface Gráfica (GUI):** Permite configurar as credenciais do MySQL e o caminho dos logs de forma intuitiva.
+*   **Visualização de Ranques:** Exibe o ranque atual e o progresso percentual para o próximo ranque em todas as categorias (Combate, Comércio, Exploração, Federação, Império, CQC).
 *   **Exportação CSV:** Exporta o conteúdo de todas as tabelas relevantes para arquivos CSV com um clique.
 
 ### Pré-requisitos
@@ -72,7 +73,8 @@ Você precisará desse caminho para configurar o aplicativo na GUI.
     *   Use o botão **"Procurar Diretório"** para selecionar o caminho dos logs de diário do Elite Dangerous.
     *   Clique em **"Salvar Configurações e Testar Conexão"**. Uma mensagem de sucesso deve aparecer. Se houver erro, verifique se o MySQL está rodando e se as credenciais estão corretas.
 
-3.  **Visualização "Controle":**
+3.  **Visualização "Ranques do Piloto":** Exibe o ranque atual e o progresso percentual para o próximo ranque em todas as categorias.
+4.  **Visualização "Controle":**
     *   O botão **"Iniciar Monitoramento"** será habilitado após salvar as configurações.
     *   Clique em **"Iniciar Monitoramento"** para começar a ler o arquivo de diário em tempo real.
     *   O **"Log de Eventos"** na parte inferior da janela mostrará as mensagens de sucesso para cada evento de diário processado e inserido no MySQL.
@@ -97,6 +99,7 @@ The main goal is to persist all collected data into a **MySQL** database and all
 *   **MySQL Persistence:** Stores data in two separate databases (`db_piloto` and `db_universo`) for organization and analysis.
 *   **API Integration (EDDN):** Prepared to receive data from the Elite Dangerous Data Network (EDDN) for market and universe information (Note: Actual EDDN integration requires ZeroMQ libraries and is a placeholder in the code due to environmental complexity).
 *   **Graphical User Interface (GUI):** Allows intuitive configuration of MySQL credentials and the Journal log path.
+*   **Ranks Visualization:** Displays the current rank and percentage progress to the next rank in all categories (Combat, Trade, Exploration, Federation, Empire, CQC).
 *   **CSV Export:** Exports the content of all relevant tables to CSV files with a single click.
 
 ### Prerequisites
@@ -157,7 +160,8 @@ You will need this path to configure the application in the GUI.
     *   Use the **"Browse Directory"** button to select the path to the Elite Dangerous Journal logs.
     *   Click **"Save Settings and Test Connection"**. A success message should appear. If there is an error, check if MySQL is running and if the credentials are correct.
 
-3.  **"Control" View:**
+3.  **"Pilot Ranks" View:** Displays the current rank and percentage progress to the next rank in all categories.
+4.  **"Control" View:**
     *   The **"Start Monitoring"** button will be enabled after saving the settings.
     *   Click **"Start Monitoring"** to begin reading the Journal file in real-time.
     *   The **"Event Log"** at the bottom of the window will show success messages for each Journal event processed and inserted into MySQL.

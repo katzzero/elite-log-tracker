@@ -29,6 +29,24 @@ CREATE TABLE IF NOT EXISTS pilot_journeys (
     FOREIGN KEY (id) REFERENCES journal_events(id) -- Opcional: linkar ao evento original
 );
 
+-- Tabela de Inventário de Materiais (obtido via evento Materials)
+CREATE TABLE IF NOT EXISTS pilot_materials (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    material_name VARCHAR(100) NOT NULL,
+    material_category VARCHAR(50) NOT NULL,
+    count INT NOT NULL,
+    UNIQUE KEY unique_material (material_name)
+);
+
+-- Tabela de Ranques do Piloto (obtido via evento Rank)
+CREATE TABLE IF NOT EXISTS pilot_ranks (
+    rank_type VARCHAR(50) PRIMARY KEY, -- Ex: Combat, Trade, Explore, Federation, Empire, CQC
+    rank_value INT NOT NULL, -- O valor numérico do ranque (0 a 8 ou 0 a 14)
+    rank_progress DOUBLE NOT NULL, -- O progresso para o próximo ranque (0.0 a 1.0)
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+
 -- Tabela de Transações (simplificada a partir de Buy/Sell/Market events)
 CREATE TABLE IF NOT EXISTS pilot_transactions (
     id INT AUTO_INCREMENT PRIMARY KEY,

@@ -233,6 +233,118 @@ class BackendCore:
                 cursor.close()
                 conn_piloto.close()
 
+    def process_rank_event(self, event_data):
+        """Processa os eventos Rank e Progress e insere/atualiza na tabela pilot_ranks."""
+        conn_piloto = self.get_db_connection('db_piloto')
+        if not conn_piloto:
+            return
+
+        try:
+            cursor = conn_piloto.cursor()
+            
+            # O evento 'Rank' contém todos os ranques de uma vez
+            if event_data.get('event') == 'Rank':
+                for rank_type in ["Combat", "Trade", "Explore", "CQC", "Federation", "Empire"]:
+                    rank_value = event_data.get(rank_type)
+                    if rank_value is not None:
+                        # Para o evento Rank, o progresso é 0.0 (será atualizado pelo Progress)
+                        sql = """
+                        INSERT INTO pilot_ranks (rank_type, rank_value, rank_progress)
+                        VALUES (%s, %s, %s)
+                        ON DUPLICATE KEY UPDATE 
+                            rank_value=VALUES(rank_value), updated_at=CURRENT_TIMESTAMP
+                        """
+                        cursor.execute(sql, (rank_type, rank_value, 0.0))
+                
+                conn_piloto.commit()
+                logging.info("Ranques iniciais (Rank event) atualizados no db_piloto.")
+
+            # O evento 'Progress' contém o progresso para o próximo ranque (0 a 100)
+            elif event_data.get('event') == 'Progress':
+                for rank_type in ["Combat", "Trade", "Explore", "CQC"]:
+                    progress_percent = event_data.get(rank_type)
+                    if progress_percent is not None:
+                        # O progresso é dado em porcentagem (0 a 100), convertemos para 0.0 a 1.0
+                        progress_value = progress_percent / 100.0
+                        
+                        sql = """
+                        UPDATE pilot_ranks SET rank_progress = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE rank_type = %s
+                        """
+                        cursor.execute(sql, (progress_value, rank_type))
+                
+                conn_piloto.commit()
+                logging.info("Progresso de ranques (Progress event) atualizado no db_piloto.")
+
+        except Error as e:
+            logging.error(f"Erro ao processar evento Rank/Progress: {e}")
+        finally:
+            if conn_piloto and conn_piloto.is_connected():
+                cursor.close()
+                conn_piloto.close()
+
+    # Adicionar aqui os métodos process_location, process_loadout, process_materials, etc.
+    def process_materials_event(self, event_data):
+        """Processa o evento Materials e atualiza a tabela pilot_materials."""
+        conn_piloto = self.get_db_connection('db_piloto')
+        if not conn_piloto:
+            return
+
+        try:
+            cursor = conn_piloto.cursor()
+            
+            # O evento Materials contém 3 listas: Raw, Manufactured, Encoded
+            for category in ['Raw', 'Manufactured', 'Encoded']:
+                materials = event_data.get(category, [])
+                for material in materials:
+                    name = material.get('Name')
+                    count = material.get('Count')
+                    
+                    if name and count is not None:
+                        sql = """
+                        INSERT INTO pilot_materials (timestamp, material_name, material_category, count)
+                        VALUES (%s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE 
+                            timestamp=VALUES(timestamp), count=VALUES(count)
+                        """
+                        timestamp = event_data.get('timestamp')
+                        cursor.execute(sql, (timestamp, name, category, count))
+            
+            conn_piloto.commit()
+            logging.info("Inventário de materiais atualizado no db_piloto.")
+
+        except Error as e:
+            logging.error(f"Erro ao processar evento Materials: {e}")
+        finally:
+            if conn_piloto and conn_piloto.is_connected():
+                cursor.close()
+                conn_piloto.close()
+
+    # Adicionar aqui os métodos process_location, process_loadout, etc.
+    def process_location(self, event_data, event_id):
+        """Processa o evento Location e atualiza o status do piloto e o sistema estelar."""
+        # Lógica de processamento de Location (Status do Piloto e Sistema Estelar)
+        # ... (manter a lógica existente)
+        pass
+
+    def process_loadout(self, event_data, event_id):
+        """Processa o evento Loadout e atualiza os módulos da nave."""
+        # Lógica de processamento de Loadout (Módulos da Nave)
+        # ... (manter a lógica existente)
+        pass
+
+    def process_shipyard(self, event_data, event_id):
+        """Processa o evento Shipyard e atualiza a lista de naves."""
+        # Lógica de processamento de Shipyard (Lista de Naves)
+        # ... (manter a lógica existente)
+        pass
+
+    def process_shipname(self, event_data, event_id):
+        """Processa o evento ShipName e atualiza o nome da nave."""
+        # Lógica de processamento de ShipName (Nome da Nave)
+        # ... (manter a lógica existente)
+        pass
+
     # Adicionar aqui os métodos process_location, process_loadout, process_materials, etc.
 
     def process_event(self, event_data):
@@ -250,6 +362,10 @@ class BackendCore:
             self.process_fsd_jump(event_data, event_id)
         elif event_type in ['BuyCommodity', 'SellCommodity']:
             self.process_transaction(event_data, event_id)
+        elif event_type in ['Rank', 'Progress']:
+            self.process_rank_event(event_data)
+        elif event_type == 'Materials':
+            self.process_materials_event(event_data)
         # Adicionar mais eventos conforme necessário
 
     # --- Funções de Controle de Monitoramento ---
