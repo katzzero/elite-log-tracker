@@ -201,6 +201,32 @@ class BackendCore:
                     cursor.close()
                     conn_universo.close()
 
+    def process_profit_event(self, event_data, event_id, profit_type, amount, description):
+        """Processa eventos de lucro e insere na tabela pilot_profit."""
+        conn_piloto = self.get_db_connection('db_piloto')
+        if not conn_piloto:
+            return
+
+        try:
+            cursor = conn_piloto.cursor()
+            sql = """
+            INSERT INTO pilot_profit (timestamp, profit_type, amount, description, event_id)
+            VALUES (%s, %s, %s, %s, %s)
+            """
+            
+            timestamp = event_data.get('timestamp')
+            
+            cursor.execute(sql, (timestamp, profit_type, amount, description, event_id))
+            conn_piloto.commit()
+            logging.info(f"Lucro de {profit_type} de {amount} Cr registrado.")
+
+        except Error as e:
+            logging.error(f"Erro ao inserir lucro: {e}")
+        finally:
+            if conn_piloto and conn_piloto.is_connected():
+                cursor.close()
+                conn_piloto.close()
+
     def process_transaction(self, event_data, event_id):
         """Processa eventos de compra/venda de commodities."""
         conn_piloto = self.get_db_connection('db_piloto')
@@ -366,6 +392,14 @@ class BackendCore:
             self.process_rank_event(event_data)
         elif event_type == 'Materials':
             self.process_materials_event(event_data)
+        elif event_type == 'MarketSell':
+            self.process_profit_event(event_data, event_id, 'TRADE', event_data.get('TotalSale'), f"Venda de {event_data.get('Count')}x {event_data.get('Type')}")
+        elif event_type == 'Bounty':
+            self.process_profit_event(event_data, event_id, 'BOUNTY', event_data.get('TotalReward'), "Recompensa por Abate")
+        elif event_type == 'MultiSellExplorationData':
+            self.process_profit_event(event_data, event_id, 'CARTOGRAPHY', event_data.get('TotalEarnings'), "Venda de Dados de Exploração")
+        elif event_type == 'SellOrganicData':
+            self.process_profit_event(event_data, event_id, 'EXOBIOLOGY', event_data.get('TotalEarnings'), "Venda de Dados de Exobiologia")
         # Adicionar mais eventos conforme necessário
 
     # --- Funções de Controle de Monitoramento ---

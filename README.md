@@ -13,6 +13,7 @@ O objetivo principal é persistir todos os dados coletados em um banco de dados 
 *   **Integração com API (EDDN):** Preparado para receber dados do Elite Dangerous Data Network (EDDN) para informações de mercado e universo (Nota: A integração real com EDDN requer bibliotecas ZeroMQ e é um placeholder no código devido à complexidade de ambiente).
 *   **Interface Gráfica (GUI):** Permite configurar as credenciais do MySQL e o caminho dos logs de forma intuitiva.
 *   **Visualização de Ranques:** Exibe o ranque atual e o progresso percentual para o próximo ranque em todas as categorias (Combate, Comércio, Exploração, Federação, Império, CQC).
+*   **Rastreamento de Lucro:** Exibe o lucro total por categoria (Comércio, Recompensa, Exploração, Exobiologia, Cartografia), formatado em Cr, MCr e BCr.
 *   **Exportação CSV:** Exporta o conteúdo de todas as tabelas relevantes para arquivos CSV com um clique.
 
 ### Pré-requisitos
@@ -100,6 +101,7 @@ The main goal is to persist all collected data into a **MySQL** database and all
 *   **API Integration (EDDN):** Prepared to receive data from the Elite Dangerous Data Network (EDDN) for market and universe information (Note: Actual EDDN integration requires ZeroMQ libraries and is a placeholder in the code due to environmental complexity).
 *   **Graphical User Interface (GUI):** Allows intuitive configuration of MySQL credentials and the Journal log path.
 *   **Ranks Visualization:** Displays the current rank and percentage progress to the next rank in all categories (Combat, Trade, Exploration, Federation, Empire, CQC).
+*   **Profit Tracking:** Displays the total profit by category (Trade, Bounty, Exploration, Exobiology, Cartography), formatted in Cr, MCr, and BCr.
 *   **CSV Export:** Exports the content of all relevant tables to CSV files with a single click.
 
 ### Prerequisites

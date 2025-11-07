@@ -59,6 +59,17 @@ CREATE TABLE IF NOT EXISTS pilot_transactions (
     total_cost INT
 );
 
+-- Tabela de Lucro do Piloto (obtido via eventos de lucro)
+CREATE TABLE IF NOT EXISTS pilot_profit (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    timestamp DATETIME NOT NULL,
+    profit_type ENUM('TRADE', 'BOUNTY', 'EXPLORATION', 'EXOBIOLOGY', 'CARTOGRAPHY', 'MISSION') NOT NULL,
+    amount BIGINT NOT NULL,
+    description VARCHAR(255),
+    event_id INT,
+    FOREIGN KEY (event_id) REFERENCES journal_events(id)
+);
+
 -- 2. Banco de Dados do Universo (db_universo)
 
 CREATE DATABASE IF NOT EXISTS db_universo;

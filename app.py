@@ -83,6 +83,115 @@ class ControlView(QWidget):
 
         layout.addStretch()
 
+class ProfitTrackerView(QWidget):
+    """Visualização para exibir o rastreamento de lucro por categoria."""
+    def __init__(self, backend_core, parent=None):
+        super().__init__(parent)
+        self.backend_core = backend_core
+        self.profit_labels = {}
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        title = QLabel("Rastreamento de Lucro (Créditos)")
+        title.setFont(QFont("Arial", 16, QFont.Bold))
+        layout.addWidget(title)
+        
+        self.update_button = QPushButton("Atualizar Lucros")
+        layout.addWidget(self.update_button)
+        
+        self.grid_layout = QGridLayout()
+        
+        # Cabeçalhos
+        self.grid_layout.addWidget(QLabel("Categoria"), 0, 0, Qt.AlignmentFlag.AlignLeft)
+        self.grid_layout.addWidget(QLabel("Total (Cr)"), 0, 1, Qt.AlignmentFlag.AlignRight)
+        self.grid_layout.addWidget(QLabel("Total (MCr)"), 0, 2, Qt.AlignmentFlag.AlignRight)
+        self.grid_layout.addWidget(QLabel("Total (BCr)"), 0, 3, Qt.AlignmentFlag.AlignRight)
+        
+        self.categories = ['TRADE', 'BOUNTY', 'EXPLORATION', 'EXOBIOLOGY', 'CARTOGRAPHY']
+        self.category_names = {
+            'TRADE': 'Comércio',
+            'BOUNTY': 'Recompensa (Bounty)',
+            'EXPLORATION': 'Exploração (Venda de Dados)',
+            'EXOBIOLOGY': 'Exobiologia',
+            'CARTOGRAPHY': 'Cartografia (Mapeamento)'
+        }
+        
+        row = 1
+        for category in self.categories:
+            self.grid_layout.addWidget(QLabel(self.category_names[category]), row, 0, Qt.AlignmentFlag.AlignLeft)
+            
+            self.profit_labels[f'{category}_CR'] = QLabel("0")
+            self.profit_labels[f'{category}_MCR'] = QLabel("0.00")
+            self.profit_labels[f'{category}_BCR'] = QLabel("0.00")
+            
+            self.grid_layout.addWidget(self.profit_labels[f'{category}_CR'], row, 1, Qt.AlignmentFlag.AlignRight)
+            self.grid_layout.addWidget(self.profit_labels[f'{category}_MCR'], row, 2, Qt.AlignmentFlag.AlignRight)
+            self.grid_layout.addWidget(self.profit_labels[f'{category}_BCR'], row, 3, Qt.AlignmentFlag.AlignRight)
+            
+            row += 1
+            
+        # Total Geral
+        self.grid_layout.addWidget(QLabel("<b>TOTAL GERAL</b>"), row, 0, Qt.AlignmentFlag.AlignLeft)
+        self.profit_labels['TOTAL_CR'] = QLabel("<b>0</b>")
+        self.profit_labels['TOTAL_MCR'] = QLabel("<b>0.00</b>")
+        self.profit_labels['TOTAL_BCR'] = QLabel("<b>0.00</b>")
+        
+        self.grid_layout.addWidget(self.profit_labels['TOTAL_CR'], row, 1, Qt.AlignmentFlag.AlignRight)
+        self.grid_layout.addWidget(self.profit_labels['TOTAL_MCR'], row, 2, Qt.AlignmentFlag.AlignRight)
+        self.grid_layout.addWidget(self.profit_labels['TOTAL_BCR'], row, 3, Qt.AlignmentFlag.AlignRight)
+        
+        layout.addLayout(self.grid_layout)
+        layout.addStretch()
+        
+        self.update_button.clicked.connect(self.update_profit_display)
+
+    def format_credits(self, amount):
+        """Formata o valor em Cr, MCr e BCr."""
+        cr = f"{amount:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        mcr = f"{amount / 1000000:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        bcr = f"{amount / 1000000000:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return cr, mcr, bcr
+
+    @Slot()
+    def update_profit_display(self):
+        conn = self.backend_core.get_db_connection('db_piloto')
+        if not conn:
+            QMessageBox.critical(self, "Erro de Conexão", "Não foi possível conectar ao banco de dados para buscar os lucros.")
+            return
+
+        try:
+            cursor = conn.cursor(dictionary=True)
+            sql = "SELECT profit_type, SUM(amount) as total_profit FROM pilot_profit GROUP BY profit_type"
+            cursor.execute(sql)
+            profit_data = {row['profit_type']: row['total_profit'] for row in cursor.fetchall()}
+            
+            total_general = 0
+            
+            for category in self.categories:
+                amount = profit_data.get(category, 0)
+                total_general += amount
+                
+                cr, mcr, bcr = self.format_credits(amount)
+                
+                self.profit_labels[f'{category}_CR'].setText(cr)
+                self.profit_labels[f'{category}_MCR'].setText(mcr)
+                self.profit_labels[f'{category}_BCR'].setText(bcr)
+                
+            # Atualizar Total Geral
+            cr, mcr, bcr = self.format_credits(total_general)
+            self.profit_labels['TOTAL_CR'].setText(f"<b>{cr}</b>")
+            self.profit_labels['TOTAL_MCR'].setText(f"<b>{mcr}</b>")
+            self.profit_labels['TOTAL_BCR'].setText(f"<b>{bcr}</b>")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Erro de Consulta", f"Erro ao buscar dados de lucro: {e}")
+        finally:
+            if conn and conn.is_connected():
+                cursor.close()
+                conn.close()
+
 class PilotRanksView(QWidget):
     """Visualização para exibir o status e progresso dos ranques do piloto."""
     def __init__(self, backend_core, parent=None):
@@ -265,15 +374,18 @@ class MainWindow(QMainWindow):
         # Adiciona as visualizações
         self.config_view = ConfigView()
         self.control_view = ControlView()
-        self.pilot_ranks_view = PilotRanksView(self.backend_core) # Nova Visualização
+        self.pilot_ranks_view = PilotRanksView(self.backend_core)
+        self.profit_tracker_view = ProfitTrackerView(self.backend_core) # Nova Visualização
         
         self.stacked_widget.addWidget(self.config_view)
         self.stacked_widget.addWidget(self.control_view)
-        self.stacked_widget.addWidget(self.pilot_ranks_view) # Adiciona a nova visualização
-
+        self.stacked_widget.addWidget(self.pilot_ranks_view)
+        self.stacked_widget.addWidget(self.profit_tracker_view) # Adiciona a nova visualização
+        
         self.nav_menu.addItem("Configuração")
         self.nav_menu.addItem("Controle")
-        self.nav_menu.addItem("Ranques do Piloto") # Adiciona item ao menu
+        self.nav_menu.addItem("Ranques do Piloto")
+        self.nav_menu.addItem("Rastreamento de Lucro") # Adiciona item ao menu
 
         # Log Viewer (agora parte do layout principal)
         log_layout = QVBoxLayout()
