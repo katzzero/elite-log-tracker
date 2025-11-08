@@ -1,26 +1,27 @@
 import csv
 import os
 import logging
-from mysql.connector import connect, Error
+import sqlite3
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class CSVExporter:
-    def __init__(self, db_config):
-        self.DB_CONFIG = db_config
+    def __init__(self, db_path):
+        self.DB_PATH = db_path
 
-    def get_db_connection(self, db_name):
-        """Cria e retorna uma conexão com o banco de dados especificado."""
+    def get_db_connection(self):
+        """Cria e retorna uma conexão com o banco de dados SQLite."""
         try:
-            conn = connect(database=db_name, **self.DB_CONFIG)
+            conn = sqlite3.connect(self.DB_PATH)
+            conn.row_factory = sqlite3.Row # Permite acessar colunas por nome
             return conn
-        except Error as e:
-            logging.error(f"Erro ao conectar ao banco de dados {db_name}: {e}")
+        except sqlite3.Error as e:
+            logging.error(f"Erro ao conectar ao banco de dados SQLite: {e}")
             return None
 
-    def export_table_to_csv(self, db_name, table_name, output_path):
+    def export_table_to_csv(self, table_name, output_path):
         """Exporta o conteúdo de uma tabela específica para um arquivo CSV."""
-        conn = self.get_db_connection(db_name)
+        conn = self.get_db_connection()
         if not conn:
             logging.error(f"Não foi possível exportar a tabela {table_name}: Falha na conexão com o DB.")
             return False
@@ -41,55 +42,52 @@ class CSVExporter:
                 
                 # Escreve as linhas de dados
                 for row in cursor:
-                    # Converte tipos de dados não-nativos (como datetime) para string
+                    # Converte tipos de dados não-nativos (como None) para string
                     processed_row = [str(item) if item is not None else '' for item in row]
                     csv_writer.writerow(processed_row)
 
             logging.info(f"Tabela '{table_name}' exportada com sucesso para: {output_path}")
             return True
 
-        except Error as e:
+        except sqlite3.Error as e:
             logging.error(f"Erro ao exportar a tabela {table_name}: {e}")
             return False
         except Exception as e:
             logging.error(f"Erro inesperado durante a exportação: {e}")
             return False
         finally:
-            if conn and conn.is_connected():
-                cursor.close()
+            if conn:
                 conn.close()
 
     def export_all_data(self, base_output_dir):
         """Exporta todas as tabelas relevantes para arquivos CSV no diretório especificado."""
         
-        # Tabelas do Piloto
-        pilot_tables = ['journal_events', 'pilot_journeys', 'pilot_transactions']
-        # Tabelas do Universo
-        universe_tables = ['star_systems', 'stations', 'commodity_prices']
-        
-        all_tables = {
-            'db_piloto': pilot_tables,
-            'db_universo': universe_tables
-        }
+        # As tabelas são agora todas no mesmo banco de dados SQLite
+        all_tables = [
+            'journal_events', 
+            'pilot_status', 
+            'pilot_materials', 
+            'pilot_profit', 
+            'ship_modules', 
+            'system_data'
+        ]
         
         exported_files = []
         
-        for db_name, tables in all_tables.items():
-            for table_name in tables:
-                filename = f"{db_name}_{table_name}.csv"
-                output_path = os.path.join(base_output_dir, filename)
-                
-                if self.export_table_to_csv(db_name, table_name, output_path):
-                    exported_files.append(output_path)
+        for table_name in all_tables:
+            filename = f"{table_name}.csv"
+            output_path = os.path.join(base_output_dir, filename)
+            
+            if self.export_table_to_csv(table_name, output_path):
+                exported_files.append(output_path)
         
         return exported_files
 
 if __name__ == '__main__':
-    # Exemplo de uso (requer MySQL rodando e configurado)
-    # from main import DB_CONFIG
-    # exporter = CSVExporter(DB_CONFIG)
+    # Exemplo de uso (requer o arquivo edlt.db)
+    # from main import SQLITE_DB_PATH
+    # exporter = CSVExporter(SQLITE_DB_PATH)
     # output_dir = os.path.expanduser('~/ed_exports')
     # os.makedirs(output_dir, exist_ok=True)
     # exporter.export_all_data(output_dir)
     pass
-

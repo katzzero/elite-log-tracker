@@ -2,6 +2,7 @@ import sys
 import os
 import logging
 import threading
+import sqlite3
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QLineEdit, QLabel, QListWidget, QStackedWidget, QFileDialog,
@@ -14,33 +15,21 @@ from PySide6.QtGui import QFont
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
 
 # Importa o core do backend
-from main import BackendCore, JOURNAL_DIR, DB_CONFIG
+from main import BackendCore, JOURNAL_DIR, SQLITE_DB_PATH
 from csv_exporter import CSVExporter
 from backend.rank_data import RANK_NAMES, PILOTS__FEDERATION_RANKS, SUPERPOWER_RANKS
+from backend.material_limits import MATERIAL_LIMITS
 
 # --- Classes de Visualização (Views) ---
 
 class ConfigView(QWidget):
-    """Visualização para configurar o MySQL e o caminho do Journal."""
+    """Visualização para configurar o caminho do Journal."""
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
 
-        # Configuração do MySQL
-        layout.addWidget(QLabel("--- Configuração MySQL ---"))
-        self.mysql_host = QLineEdit("localhost")
-        self.mysql_user = QLineEdit("ed_user")
-        self.mysql_pass = QLineEdit("ed_password")
-        
-        layout.addWidget(QLabel("Host:"))
-        layout.addWidget(self.mysql_host)
-        layout.addWidget(QLabel("Usuário:"))
-        layout.addWidget(self.mysql_user)
-        layout.addWidget(QLabel("Senha:"))
-        layout.addWidget(self.mysql_pass)
-
         # Configuração do Journal Path
-        layout.addWidget(QLabel("\n--- Caminho do Diário (Journal Path) ---"))
+        layout.addWidget(QLabel("--- Caminho do Diário (Journal Path) ---"))
         self.journal_path_input = QLineEdit(JOURNAL_DIR)
         self.journal_path_input.setPlaceholderText("Ex: C:\\Users\\SeuUsuario\\Saved Games\\Frontier Developments\\Elite Dangerous")
         
@@ -51,9 +40,10 @@ class ConfigView(QWidget):
         path_layout.addWidget(self.browse_button)
         layout.addLayout(path_layout)
         
-        self.save_config_button = QPushButton("Salvar Configurações e Testar Conexão")
+        self.save_config_button = QPushButton("Salvar Configurações")
         layout.addWidget(self.save_config_button)
 
+        layout.addWidget(QLabel(f"\nBanco de Dados: SQLite ({SQLITE_DB_PATH})"))
         layout.addStretch()
 
 class ControlView(QWidget):
@@ -156,13 +146,13 @@ class ProfitTrackerView(QWidget):
 
     @Slot()
     def update_profit_display(self):
-        conn = self.backend_core.get_db_connection('db_piloto')
+        conn = self.backend_core.get_db_connection()
         if not conn:
-            QMessageBox.critical(self, "Erro de Conexão", "Não foi possível conectar ao banco de dados para buscar os lucros.")
+            QMessageBox.critical(self, "Erro de Conexão", "Não foi possível conectar ao banco de dados SQLite.")
             return
 
         try:
-            cursor = conn.cursor(dictionary=True)
+            cursor = conn.cursor()
             sql = "SELECT profit_type, SUM(amount) as total_profit FROM pilot_profit GROUP BY profit_type"
             cursor.execute(sql)
             profit_data = {row['profit_type']: row['total_profit'] for row in cursor.fetchall()}
@@ -188,8 +178,7 @@ class ProfitTrackerView(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Erro de Consulta", f"Erro ao buscar dados de lucro: {e}")
         finally:
-            if conn and conn.is_connected():
-                cursor.close()
+            if conn:
                 conn.close()
 
 class PilotRanksView(QWidget):
@@ -242,23 +231,32 @@ class PilotRanksView(QWidget):
 
     @Slot()
     def update_ranks_display(self):
-        conn = self.backend_core.get_db_connection('db_piloto')
+        conn = self.backend_core.get_db_connection()
         if not conn:
-            QMessageBox.critical(self, "Erro de Conexão", "Não foi possível conectar ao banco de dados para buscar os ranques.")
+            QMessageBox.critical(self, "Erro de Conexão", "Não foi possível conectar ao banco de dados SQLite.")
             return
 
         try:
-            cursor = conn.cursor(dictionary=True)
-            sql = "SELECT rank_type, rank_value, rank_progress FROM pilot_ranks"
+            cursor = conn.cursor()
+            # A consulta agora é feita na tabela pilot_status
+            sql = "SELECT rank_combat, progress_combat, rank_trade, progress_trade, rank_explore, progress_explore, rank_cqc, progress_cqc, rank_federation, progress_federation, rank_empire, progress_empire FROM pilot_status LIMIT 1"
             cursor.execute(sql)
-            ranks_data = {row['rank_type']: row for row in cursor.fetchall()}
+            data = cursor.fetchone()
             
-            for rank_type in PILOTS__FEDERATION_RANKS + SUPERPOWER_RANKS:
-                data = ranks_data.get(rank_type)
+            if data:
+                # Mapeamento dos campos do banco para os tipos de ranque
+                rank_map = {
+                    'Combat': ('rank_combat', 'progress_combat'),
+                    'Trade': ('rank_trade', 'progress_trade'),
+                    'Explore': ('rank_explore', 'progress_explore'),
+                    'CQC': ('rank_cqc', 'progress_cqc'),
+                    'Federation': ('rank_federation', 'progress_federation'),
+                    'Empire': ('rank_empire', 'progress_empire'),
+                }
                 
-                if data:
-                    rank_value = data['rank_value']
-                    progress = data['rank_progress'] # 0.0 a 1.0
+                for rank_type, (rank_col, progress_col) in rank_map.items():
+                    rank_value = data[rank_col]
+                    progress = data[progress_col] # 0.0 a 1.0
                     
                     # Ranque Atual (Nome)
                     rank_name = RANK_NAMES.get(rank_type, ["N/A"])[rank_value]
@@ -273,7 +271,8 @@ class PilotRanksView(QWidget):
                         self.progress_bars[rank_type].setFormat(f"{progress_percent}% para {RANK_NAMES[rank_type][rank_value + 1] if rank_value + 1 < len(RANK_NAMES[rank_type]) else 'Máximo'}")
                     else:
                         self.progress_bars[rank_type].setFormat(f"{progress_percent}%")
-                else:
+            else:
+                for rank_type in PILOTS__FEDERATION_RANKS + SUPERPOWER_RANKS:
                     self.rank_labels[rank_type].setText("N/A")
                     self.progress_bars[rank_type].setValue(0)
                     self.progress_bars[rank_type].setFormat("N/A")
@@ -281,8 +280,7 @@ class PilotRanksView(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Erro de Consulta", f"Erro ao buscar dados de ranques: {e}")
         finally:
-            if conn and conn.is_connected():
-                cursor.close()
+            if conn:
                 conn.close()
 
 # --- Handlers e Workers ---
@@ -320,15 +318,15 @@ class CSVExportWorker(QObject):
     finished = Signal()
     error = Signal(str)
 
-    def __init__(self, db_config, output_dir):
+    def __init__(self, output_dir):
         super().__init__()
-        self.db_config = db_config
         self.output_dir = output_dir
 
     @Slot()
     def run(self):
         try:
-            exporter = CSVExporter(self.db_config)
+            # O CSVExporter agora precisa ser adaptado para SQLite
+            exporter = CSVExporter(SQLITE_DB_PATH)
             exporter.export_all_data(self.output_dir)
         except Exception as e:
             self.error.emit(f"Erro durante a exportação CSV: {e}")
@@ -348,7 +346,8 @@ class MainWindow(QMainWindow):
         logging.getLogger().addHandler(self.log_handler)
         logging.getLogger().setLevel(logging.INFO)
 
-        self.backend_core = BackendCore(DB_CONFIG, JOURNAL_DIR)
+        # O BackendCore não precisa mais de DB_CONFIG
+        self.backend_core = BackendCore(JOURNAL_DIR)
         self.backend_thread = None
         self.backend_worker = None
 
@@ -374,18 +373,18 @@ class MainWindow(QMainWindow):
         # Adiciona as visualizações
         self.config_view = ConfigView()
         self.control_view = ControlView()
+        self.profit_tracker_view = ProfitTrackerView(self.backend_core)
         self.pilot_ranks_view = PilotRanksView(self.backend_core)
-        self.profit_tracker_view = ProfitTrackerView(self.backend_core) # Nova Visualização
         
         self.stacked_widget.addWidget(self.config_view)
         self.stacked_widget.addWidget(self.control_view)
+        self.stacked_widget.addWidget(self.profit_tracker_view)
         self.stacked_widget.addWidget(self.pilot_ranks_view)
-        self.stacked_widget.addWidget(self.profit_tracker_view) # Adiciona a nova visualização
-        
+
         self.nav_menu.addItem("Configuração")
         self.nav_menu.addItem("Controle")
+        self.nav_menu.addItem("Rastreamento de Lucro")
         self.nav_menu.addItem("Ranques do Piloto")
-        self.nav_menu.addItem("Rastreamento de Lucro") # Adiciona item ao menu
 
         # Log Viewer (agora parte do layout principal)
         log_layout = QVBoxLayout()
@@ -400,67 +399,50 @@ class MainWindow(QMainWindow):
         self.watermark_label.setStyleSheet("color: rgba(255, 255, 255, 50); font-size: 10px;")
         self.watermark_label.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
         
-        # Adicionar a marca d'água ao layout principal (no canto inferior direito)
-        # Usaremos um layout vertical para o conteúdo principal (menu + stacked) e o log,
-        # e a marca d'água será adicionada ao final desse layout vertical.
-        # Como o layout principal já é QHBoxLayout, vamos criar um QVBoxLayout para o lado direito (stacked + log)
-        
-        # A maneira mais simples de adicionar a marca d'água no canto inferior direito
-        # é adicioná-la ao final do layout vertical que contém o log.
+        # Adicionar a marca d'água ao layout vertical que contém o log.
         log_layout.addWidget(self.watermark_label)
 
     def connect_signals(self):
         self.nav_menu.currentRowChanged.connect(self.stacked_widget.setCurrentIndex)
         
-        # Sinais da ConfigView
+        # Configuração
         self.config_view.browse_button.clicked.connect(self.browse_journal_path)
         self.config_view.save_config_button.clicked.connect(self.save_config)
+        
+        # Controle
+        self.control_view.start_button.clicked.connect(self.start_backend_worker)
+        self.control_view.stop_button.clicked.connect(self.stop_backend_worker)
+        self.control_view.export_button.clicked.connect(self.start_csv_export_worker)
 
-        # Sinais da ControlView
-        self.control_view.start_button.clicked.connect(self.start_monitoring)
-        self.control_view.stop_button.clicked.connect(self.stop_monitoring)
-        self.control_view.export_button.clicked.connect(self.prompt_csv_export)
-
-    @Slot(str)
-    def update_log_viewer(self, text):
-        self.log_viewer.append(text)
-
-    def update_status(self, text, is_running=False):
-        self.control_view.status_label.setText(f"Status: {text}")
-        if is_running:
-            self.control_view.status_label.setStyleSheet("font-weight: bold; color: green;")
-        else:
-            self.control_view.status_label.setStyleSheet("font-weight: bold; color: blue;")
-
+    @Slot()
     def browse_journal_path(self):
-        directory = QFileDialog.getExistingDirectory(self, "Selecione o Diretório do Elite Dangerous Journal")
+        directory = QFileDialog.getExistingDirectory(self, "Selecione o Diretório de Logs do Elite Dangerous", JOURNAL_DIR)
         if directory:
             self.config_view.journal_path_input.setText(directory)
 
+    @Slot()
     def save_config(self):
-        new_db_config = {
-            "host": self.config_view.mysql_host.text(),
-            "user": self.config_view.mysql_user.text(),
-            "password": self.config_view.mysql_pass.text(),
-        }
+        # Apenas salva o caminho do diário, pois o DB é SQLite (não precisa de credenciais)
         new_journal_dir = self.config_view.journal_path_input.text()
+        self.backend_core.JOURNAL_DIR = new_journal_dir
         
-        temp_core = BackendCore(new_db_config, new_journal_dir)
-        
-        conn = temp_core.get_db_connection("db_piloto")
-        if conn:
-            QMessageBox.information(self, "Configuração Salva", "Conexão com o MySQL bem-sucedida! Configurações salvas.")
-            conn.close()
-            
-            self.backend_core = temp_core
-            self.control_view.start_button.setEnabled(True)
-            self.update_status("Configuração salva. Pronto para iniciar o monitoramento.")
-        else:
-            QMessageBox.critical(self, "Erro de Conexão", "Falha ao conectar ao MySQL. Verifique as credenciais e se o servidor está rodando.")
-            self.control_view.start_button.setEnabled(False)
+        # O DB_CONFIG não existe mais, então apenas atualizamos o status
+        self.update_status(f"Configurações salvas. Caminho do Diário: {new_journal_dir}")
+        self.control_view.start_button.setEnabled(True)
+        QMessageBox.information(self, "Sucesso", "Configurações salvas. Você pode iniciar o monitoramento.")
 
-    def start_monitoring(self):
+    @Slot(str)
+    def update_log_viewer(self, message):
+        self.log_viewer.append(message)
+
+    @Slot(str)
+    def update_status(self, message):
+        self.control_view.status_label.setText(f"Status: {message}")
+
+    @Slot()
+    def start_backend_worker(self):
         if self.backend_core.is_running:
+            QMessageBox.warning(self, "Aviso", "O monitoramento já está em execução.")
             return
 
         self.backend_thread = QThread()
@@ -471,62 +453,53 @@ class MainWindow(QMainWindow):
         self.backend_worker.finished.connect(self.backend_thread.quit)
         self.backend_worker.finished.connect(self.backend_worker.deleteLater)
         self.backend_thread.finished.connect(self.backend_thread.deleteLater)
-        self.backend_worker.error.connect(lambda e: QMessageBox.critical(self, "Erro de Execução", e))
-        
+        self.backend_worker.error.connect(self.handle_backend_error)
+
         self.backend_thread.start()
-        
+        self.update_status("Monitoramento Iniciado...")
         self.control_view.start_button.setEnabled(False)
         self.control_view.stop_button.setEnabled(True)
-        self.update_status("Monitoramento em execução...", is_running=True)
-        logging.info("GUI: Monitoramento iniciado.")
 
-    def stop_monitoring(self):
-        if not self.backend_core.is_running:
-            return
-            
-        self.backend_core.stop_monitoring()
-        
-        if self.backend_thread and self.backend_thread.isRunning():
-            self.backend_thread.quit()
-            self.backend_thread.wait(2000)
-
-        self.control_view.start_button.setEnabled(True)
-        self.control_view.stop_button.setEnabled(False)
-        self.update_status("Monitoramento parado.")
-        logging.info("GUI: Monitoramento parado.")
-
-    def prompt_csv_export(self):
-        if not self.backend_core.DB_CONFIG.get("user"):
-            QMessageBox.warning(self, "Configuração Pendente", "Salve as configurações do MySQL antes de exportar.")
-            return
-
-        export_dir = QFileDialog.getExistingDirectory(self, "Selecione o Diretório de Destino para CSV")
-        if not export_dir:
-            return
-
-        self.control_view.export_button.setEnabled(False)
-        self.update_status("Exportando dados para CSV...")
-        
-        self.export_thread = QThread()
-        self.export_worker = CSVExportWorker(self.backend_core.DB_CONFIG, export_dir)
-        self.export_worker.moveToThread(self.export_thread)
-
-        self.export_thread.started.connect(self.export_worker.run)
-        self.export_worker.finished.connect(self.export_thread.quit)
-        self.export_worker.finished.connect(self.export_finished)
-        self.export_worker.finished.connect(self.export_worker.deleteLater)
-        self.export_thread.finished.connect(self.export_thread.deleteLater)
-        self.export_worker.error.connect(lambda e: QMessageBox.critical(self, "Erro de Exportação", e))
-        
-        self.export_thread.start()
-        
     @Slot()
-    def export_finished(self):
-        self.control_view.export_button.setEnabled(True)
-        self.update_status("Exportação CSV concluída.", is_running=self.backend_core.is_running)
-        QMessageBox.information(self, "Exportação Concluída", "Todos os dados foram exportados para CSV com sucesso!")
+    def stop_backend_worker(self):
+        if self.backend_core.is_running:
+            self.backend_core.stop_monitoring()
+            self.backend_thread.quit()
+            self.update_status("Monitoramento Parado.")
+            self.control_view.start_button.setEnabled(True)
+            self.control_view.stop_button.setEnabled(False)
 
-if __name__ == "__main__":
+    @Slot(str)
+    def handle_backend_error(self, error_message):
+        QMessageBox.critical(self, "Erro no Backend", error_message)
+        self.stop_backend_worker()
+
+    @Slot()
+    def start_csv_export_worker(self):
+        output_dir = QFileDialog.getExistingDirectory(self, "Selecione o Diretório para Exportar CSV")
+        if not output_dir:
+            return
+
+        self.update_status("Exportando CSV...")
+        
+        export_thread = QThread()
+        export_worker = CSVExportWorker(output_dir)
+        export_worker.moveToThread(export_thread)
+
+        export_thread.started.connect(export_worker.run)
+        export_worker.finished.connect(export_thread.quit)
+        export_worker.finished.connect(export_worker.deleteLater)
+        export_thread.finished.connect(export_thread.deleteLater)
+        export_worker.finished.connect(lambda: self.update_status("Exportação CSV Concluída."))
+        export_worker.error.connect(lambda msg: QMessageBox.critical(self, "Erro de Exportação", msg))
+
+        export_thread.start()
+
+    def closeEvent(self, event):
+        self.stop_backend_worker()
+        event.accept()
+
+if __name__ == '__main__':
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
