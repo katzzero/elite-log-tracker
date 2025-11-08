@@ -395,6 +395,20 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(self.log_viewer)
         self.main_layout.addLayout(log_layout)
 
+        # Marca d'água
+        self.watermark_label = QLabel("by CMdr. Katzzero")
+        self.watermark_label.setStyleSheet("color: rgba(255, 255, 255, 50); font-size: 10px;")
+        self.watermark_label.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
+        
+        # Adicionar a marca d'água ao layout principal (no canto inferior direito)
+        # Usaremos um layout vertical para o conteúdo principal (menu + stacked) e o log,
+        # e a marca d'água será adicionada ao final desse layout vertical.
+        # Como o layout principal já é QHBoxLayout, vamos criar um QVBoxLayout para o lado direito (stacked + log)
+        
+        # A maneira mais simples de adicionar a marca d'água no canto inferior direito
+        # é adicioná-la ao final do layout vertical que contém o log.
+        log_layout.addWidget(self.watermark_label)
+
     def connect_signals(self):
         self.nav_menu.currentRowChanged.connect(self.stacked_widget.setCurrentIndex)
         
