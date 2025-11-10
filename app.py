@@ -1,5 +1,64 @@
 import sys
 import os
+
+# ============================================================================
+# VERIFICAÇÃO DE DEPENDÊNCIAS
+# ============================================================================
+def check_and_handle_dependencies():
+    """Verifica dependências críticas antes de iniciar o aplicativo."""
+    missing = []
+
+    # Verifica PySide6
+    try:
+        import PySide6
+    except ImportError:
+        missing.append('PySide6')
+
+    # Verifica watchdog
+    try:
+        import watchdog
+    except ImportError:
+        missing.append('watchdog')
+
+    if missing:
+        print("=" * 70)
+        print("ERRO: Dependências não encontradas")
+        print("=" * 70)
+        print("\nOs seguintes módulos são necessários mas não estão instalados:\n")
+        for module in missing:
+            print(f"  - {module}")
+        print("\n" + "-" * 70)
+        print("Para instalar, execute:\n")
+        print(f"  pip install {' '.join(missing)}")
+        print("\nOu instale todas as dependências:")
+        print("  pip install -r requirements.txt")
+        print("=" * 70)
+
+        # Tenta mostrar diálogo gráfico se PySide6 estiver disponível
+        if 'PySide6' not in missing:
+            try:
+                from PySide6.QtWidgets import QApplication, QMessageBox
+                app = QApplication(sys.argv)
+                QMessageBox.critical(
+                    None,
+                    "Elite Dangerous Log Tracker - Erro de Dependências",
+                    f"Módulos necessários não encontrados:\n\n" +
+                    "\n".join([f"• {m}" for m in missing]) +
+                    f"\n\nPara instalar, execute:\n\npip install {' '.join(missing)}",
+                    QMessageBox.Ok
+                )
+            except:
+                pass
+
+        sys.exit(1)
+
+# Executar verificação de dependências antes de importar qualquer módulo
+check_and_handle_dependencies()
+
+# ============================================================================
+# IMPORTS
+# ============================================================================
+
 import logging
 import threading
 import sqlite3
@@ -531,7 +590,9 @@ class MainWindow(QMainWindow):
 
         self.update_status("Exportando CSV...")
         self.control_view.progress_bar.setVisible(True)
-        self.control_view.progress_bar.setRange(0, 0)  # Modo indeterminado
+        # FIX: Modo determinado (0-100%) ao invés de indeterminado
+        self.control_view.progress_bar.setRange(0, 100)
+        self.control_view.progress_bar.setValue(0)
         
         export_thread = QThread()
         export_worker = CSVExportWorker(output_dir)
@@ -543,6 +604,8 @@ class MainWindow(QMainWindow):
         export_thread.finished.connect(export_thread.deleteLater)
         export_worker.finished.connect(self.handle_export_finished)
         export_worker.error.connect(self.handle_export_error)
+        # FIX: Conectar o sinal de progresso à barra
+        export_worker.progress.connect(self.control_view.progress_bar.setValue)
 
         export_thread.start()
 
