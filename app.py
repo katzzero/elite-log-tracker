@@ -349,7 +349,11 @@ class CSVExportWorker(QObject):
     def run(self):
         try:
             exporter = CSVExporter(SQLITE_DB_PATH)
-            exported_files = exporter.export_all_data(self.output_dir)
+            # FIX: Passa callback para emitir progresso durante a exportação
+            exported_files = exporter.export_all_data(
+                self.output_dir,
+                progress_callback=lambda percent: self.progress.emit(percent)
+            )
             self.finished.emit(exported_files)
         except Exception as e:
             self.error.emit(f"Erro durante a exportação CSV: {e}")
