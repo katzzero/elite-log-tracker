@@ -5,30 +5,27 @@ import logging
 import threading
 import sqlite3
 import hashlib
+from typing import Optional, Dict, Any, Callable
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-
-# Importa o módulo auxiliar (assumindo que ele está no mesmo diretório ou no PYTHONPATH)
-from eddn_client import start_eddn_monitoring 
-from backend.rank_data import RANK_NAMES, PILOTS__FEDERATION_RANKS, SUPERPOWER_RANKS
-from backend.material_limits import MATERIAL_LIMITS
 
 # Configuração de Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Variáveis de Configuração
-JOURNAL_DIR = os.path.expanduser('~/Saved Games/Frontier Developments/Elite Dangerous') # Caminho padrão no Windows
+JOURNAL_DIR = os.path.expanduser('~/Saved Games/Frontier Developments/Elite Dangerous')
 SQLITE_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'edlt.db')
 
-# --- Funções Auxiliares de Arquivo (fora da classe para manter a compatibilidade) ---
+# --- Funções Auxiliares de Arquivo ---
 
-def get_latest_journal_file(directory):
+def get_latest_journal_file(directory: str) -> Optional[str]:
     """Encontra o arquivo de diário mais recente no diretório."""
     try:
-        files = [os.path.join(directory, f) for f in os.listdir(directory) if f.startswith('Journal.') and f.endswith('.log')]
+        files = [os.path.join(directory, f) for f in os.listdir(directory) 
+                 if f.startswith('Journal.') and f.endswith('.log')]
         if not files:
             return None
-        # O formato do nome do arquivo é 'Journal.YYYY-MM-DDTHHMMSS.XX.log', então a ordenação alfabética funciona
+        # O formato do nome do arquivo é 'Journal.YYYY-MM-DDTHHMMSS.XX.log'
         return max(files, key=os.path.getmtime)
     except FileNotFoundError:
         logging.error(f"Diretório de logs não encontrado: {directory}")
@@ -37,116 +34,165 @@ def get_latest_journal_file(directory):
         logging.error(f"Erro ao buscar arquivo de log mais recente: {e}")
         return None
 
+
 class JournalFileMonitor(FileSystemEventHandler):
     """Manipulador de eventos do Watchdog para monitorar a escrita no arquivo de diário."""
     
-    def __init__(self, journal_path, event_processor_callback):
+    def __init__(self, journal_path: str, event_processor_callback: Callable):
         self.journal_path = journal_path
         self.file_handle = None
-        self.event_processor_callback = event_processor_callback # Callback para processar o evento
+        self.event_processor_callback = event_processor_callback
         self.open_file()
 
-    def open_file(self):
+    def open_file(self) -> None:
         """Abre o arquivo de diário e move o ponteiro para o final."""
         if self.file_handle:
-            self.file_handle.close()
+            try:
+                self.file_handle.close()
+            except:
+                pass
         
-        try:
-            self.file_handle = open(self.journal_path, 'r', encoding='utf-8')
-            self.file_handle.seek(0, os.SEEK_END)
-            logging.info(f"Monitorando o arquivo: {self.journal_path}")
-        except Exception as e:
-            logging.error(f"Não foi possível abrir o arquivo {self.journal_path}: {e}")
-            self.file_handle = None
+        # FIX: Retry logic para race conditions
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                self.file_handle = open(self.journal_path, 'r', encoding='utf-8')
+                self.file_handle.seek(0, os.SEEK_END)
+                logging.info(f"Monitorando o arquivo: {self.journal_path}")
+                return
+            except (IOError, OSError) as e:
+                if attempt < max_retries - 1:
+                    time.sleep(0.5)
+                    logging.warning(f"Tentativa {attempt + 1}/{max_retries} falhou, tentando novamente...")
+                else:
+                    logging.error(f"Não foi possível abrir após {max_retries} tentativas: {e}")
+                    self.file_handle = None
 
     def on_modified(self, event):
         """Chamado quando o arquivo de diário é modificado."""
         if event.src_path == self.journal_path and not event.is_directory:
             self.read_new_lines()
 
-    def read_new_lines(self):
+    # FIX: Detectar novos arquivos de journal
+    def on_created(self, event):
+        """Chamado quando um novo arquivo é criado."""
+        if (not event.is_directory and 
+            event.src_path.endswith('.log') and 
+            'Journal.' in os.path.basename(event.src_path)):
+            
+            new_file = event.src_path
+            if os.path.getmtime(new_file) > os.path.getmtime(self.journal_path):
+                logging.info(f"Novo arquivo de journal detectado: {new_file}")
+                self.journal_path = new_file
+                self.open_file()
+
+    def read_new_lines(self) -> None:
         """Lê e processa as novas linhas adicionadas ao arquivo."""
         if not self.file_handle:
             self.open_file()
             if not self.file_handle:
                 return
 
-        new_data = self.file_handle.readlines()
+        try:
+            new_data = self.file_handle.readlines()
+        except (IOError, OSError) as e:
+            logging.error(f"Erro ao ler arquivo: {e}")
+            self.open_file()
+            return
         
         for line in new_data:
             try:
+                # FIX: Validação aprimorada de JSON
+                line = line.strip()
+                if not line:
+                    continue
+                    
                 event_data = json.loads(line)
-                # Chama o callback (que é o método process_event da classe BackendCore)
-                self.event_processor_callback(event_data) 
+                
+                # FIX: Validar estrutura básica do evento
+                if not isinstance(event_data, dict):
+                    logging.warning(f"Evento não é um objeto JSON válido: {line[:50]}")
+                    continue
+                
+                if 'event' not in event_data or 'timestamp' not in event_data:
+                    logging.warning(f"Evento sem campos obrigatórios (event/timestamp): {line[:50]}")
+                    continue
+                
+                self.event_processor_callback(event_data)
+                
             except json.JSONDecodeError as e:
-                logging.error(f"Erro ao decodificar JSON: {e} na linha: {line.strip()}")
+                logging.error(f"Erro ao decodificar JSON: {e} na linha: {line[:100]}")
             except Exception as e:
                 logging.error(f"Erro desconhecido ao processar linha: {e}")
 
-    def stop(self):
+    def stop(self) -> None:
         """Fecha o handle do arquivo."""
         if self.file_handle:
-            self.file_handle.close()
+            try:
+                self.file_handle.close()
+            except:
+                pass
+
 
 # --- Core do Backend ---
 
 class BackendCore:
-    def __init__(self, journal_dir):
+    def __init__(self, journal_dir: str):
         self.JOURNAL_DIR = journal_dir
         self.observer = None
         self.event_handler = None
         self.monitoring_thread = None
-        self.eddn_thread = None
         self.is_running = False
         self.db_path = SQLITE_DB_PATH
+        self.event_count = 0  # FIX: Contador para logging menos verboso
         self.initialize_db()
 
     # --- Funções de Banco de Dados (SQLite) ---
 
-    def get_db_connection(self):
+    def get_db_connection(self) -> Optional[sqlite3.Connection]:
         """Cria e retorna uma conexão com o banco de dados SQLite."""
         try:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row # Permite acessar colunas por nome
+            conn = sqlite3.connect(self.db_path, timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            # FIX: Ativar WAL mode para melhor concorrência
+            conn.execute("PRAGMA journal_mode=WAL")
             return conn
         except sqlite3.Error as e:
             logging.error(f"Erro ao conectar ao banco de dados SQLite: {e}")
             return None
 
-    def initialize_db(self):
+    def initialize_db(self) -> None:
         """Cria as tabelas se não existirem."""
         conn = self.get_db_connection()
         if not conn:
             return
 
         try:
-            with open(os.path.join(os.path.dirname(__file__), 'sqlite_schema.sql'), 'r') as f:
+            schema_path = os.path.join(os.path.dirname(__file__), 'sqlite_schema.sql')
+            with open(schema_path, 'r', encoding='utf-8') as f:
                 sql_script = f.read()
             conn.executescript(sql_script)
             conn.commit()
             logging.info("Banco de dados SQLite inicializado com sucesso.")
+        except FileNotFoundError:
+            logging.error(f"Arquivo de schema não encontrado: {schema_path}")
         except Exception as e:
             logging.error(f"Erro ao inicializar o banco de dados SQLite: {e}")
         finally:
             if conn:
                 conn.close()
 
-    def insert_journal_event(self, event_data):
-        """Insere o evento JSON bruto na tabela journal_events e retorna o ID."""
-        conn = self.get_db_connection()
-        if not conn:
-            return None
-
+    def _insert_journal_event(self, conn: sqlite3.Connection, event_data: Dict[str, Any]) -> Optional[int]:
+        """Insere o evento JSON bruto na tabela journal_events (usa conexão existente)."""
         try:
             cursor = conn.cursor()
             
             timestamp = event_data.get('timestamp')
             event_type = event_data.get('event')
-            event_json_str = json.dumps(event_data)
+            event_json_str = json.dumps(event_data, ensure_ascii=False)
             
-            # Cria um hash para garantir a unicidade (timestamp + event_type + 10 primeiros chars do JSON)
-            # Isso é uma heurística para evitar duplicatas sem processar o arquivo inteiro
-            unique_str = f"{timestamp}{event_type}{event_json_str[:10]}"
+            # FIX: Hash do JSON completo para melhor detecção de duplicatas
+            unique_str = f"{timestamp}{event_type}{event_json_str}"
             event_hash = hashlib.sha256(unique_str.encode('utf-8')).hexdigest()
 
             sql = """
@@ -155,69 +201,58 @@ class BackendCore:
             """
             
             cursor.execute(sql, (timestamp, event_type, event_json_str, event_hash))
-            conn.commit()
             
             if cursor.rowcount > 0:
-                logging.info(f"Evento '{event_type}' inserido no SQLite.")
+                # FIX: Logging menos verboso
+                self.event_count += 1
+                if self.event_count % 10 == 0:
+                    logging.info(f"{self.event_count} eventos processados (último: '{event_type}')")
                 return cursor.lastrowid
             else:
-                # O evento foi ignorado (duplicado)
-                return None
+                return None  # Evento duplicado
 
         except sqlite3.Error as e:
             logging.error(f"Erro ao inserir evento no SQLite: {e}")
-        finally:
-            if conn:
-                conn.close()
-        return None
+            raise
 
-    # --- Funções de Processamento de Eventos (SQLite) ---
-
-    def update_pilot_status(self, event_data):
-        """Atualiza o status do piloto (ranques, localização, etc.) na tabela pilot_status."""
-        conn = self.get_db_connection()
-        if not conn:
-            return
-
+    def _update_pilot_status(self, conn: sqlite3.Connection, event_data: Dict[str, Any]) -> None:
+        """Atualiza o status do piloto (usa conexão existente)."""
         try:
             cursor = conn.cursor()
             
-            # 1. Obter o nome do piloto (assumindo que o evento 'LoadGame' ou 'Commander' já ocorreu)
-            # Para simplificar, vamos usar um nome padrão se não for encontrado, mas o ideal é buscar o último CommanderName
             pilot_name = event_data.get('Commander', 'CMDR_Unknown')
             
-            # 2. Inserir ou atualizar o registro do piloto
             cursor.execute("INSERT OR IGNORE INTO pilot_status (pilot_name, last_update) VALUES (?, ?)", 
-                           (pilot_name, event_data.get('timestamp')))
+                          (pilot_name, event_data.get('timestamp')))
             
-            # 3. Construir a query de atualização
             update_fields = {}
-            params = []
             
-            # Ranques (do evento 'Rank')
-            if event_data.get('event') == 'Rank':
+            event_type = event_data.get('event')
+            
+            # Ranques
+            if event_type == 'Rank':
                 for rank_type in ['Combat', 'Trade', 'Explore', 'CQC', 'Federation', 'Empire']:
                     if rank_type in event_data:
                         update_fields[f'rank_{rank_type.lower()}'] = event_data[rank_type]
             
-            # Progresso (do evento 'Progress')
-            elif event_data.get('event') == 'Progress':
+            # Progresso - FIX: Validação de limites
+            elif event_type == 'Progress':
                 for rank_type in ['Combat', 'Trade', 'Explore', 'CQC', 'Federation', 'Empire']:
                     if rank_type in event_data:
-                        update_fields[f'progress_{rank_type.lower()}'] = event_data[rank_type] / 100.0 # Converte para 0.0 a 1.0
+                        progress = min(max(event_data[rank_type] / 100.0, 0.0), 1.0)
+                        update_fields[f'progress_{rank_type.lower()}'] = progress
             
-            # Localização (do evento 'Location' ou 'FSDJump')
-            elif event_data.get('event') in ['Location', 'FSDJump']:
+            # Localização
+            elif event_type in ['Location', 'FSDJump']:
                 update_fields['system_name'] = event_data.get('StarSystem')
                 update_fields['station_name'] = event_data.get('StationName')
                 
-            # Ship (do evento 'Loadout' ou 'ShipyardSwap')
-            elif event_data.get('event') in ['Loadout', 'ShipyardSwap']:
+            # Ship
+            elif event_type in ['Loadout', 'ShipyardSwap']:
                 update_fields['ship_id'] = event_data.get('ShipID')
                 update_fields['ship_name'] = event_data.get('ShipName')
                 update_fields['ship_model'] = event_data.get('Ship')
             
-            # 4. Executar a atualização
             if update_fields:
                 update_fields['last_update'] = event_data.get('timestamp')
                 
@@ -227,74 +262,52 @@ class BackendCore:
                 
                 sql = f"UPDATE pilot_status SET {set_clause} WHERE pilot_name = ?"
                 cursor.execute(sql, params)
-                conn.commit()
-                logging.info(f"Status do piloto atualizado por evento '{event_data.get('event')}'.")
 
         except sqlite3.Error as e:
             logging.error(f"Erro ao atualizar status do piloto: {e}")
-        finally:
-            if conn:
-                conn.close()
+            raise
 
-    def update_pilot_materials(self, event_data):
-        """Atualiza o inventário de materiais na tabela pilot_materials."""
+    def _update_pilot_materials(self, conn: sqlite3.Connection, event_data: Dict[str, Any]) -> None:
+        """Atualiza o inventário de materiais (usa conexão existente)."""
         if event_data.get('event') != 'Materials':
             return
             
-        conn = self.get_db_connection()
-        if not conn:
-            return
-
         try:
             cursor = conn.cursor()
             
-            # Limpa a tabela antes de inserir o novo inventário completo
             cursor.execute("DELETE FROM pilot_materials")
             
-            materials = event_data.get('Raw', []) + event_data.get('Manufactured', []) + event_data.get('Encoded', [])
+            materials = (event_data.get('Raw', []) + 
+                        event_data.get('Manufactured', []) + 
+                        event_data.get('Encoded', []))
             
             for material in materials:
                 name = material.get('Name')
-                count = material.get('Count')
-                category = material.get('Category')
+                count = material.get('Count', 0)
+                category = material.get('Category', 'Unknown')
                 
-                sql = "INSERT INTO pilot_materials (material_name, category, count) VALUES (?, ?, ?)"
-                cursor.execute(sql, (name, category, count))
-                
-            conn.commit()
-            logging.info(f"Inventário de materiais atualizado com {len(materials)} itens.")
+                if name and count >= 0:
+                    sql = "INSERT INTO pilot_materials (material_name, category, count) VALUES (?, ?, ?)"
+                    cursor.execute(sql, (name, category, count))
 
         except sqlite3.Error as e:
             logging.error(f"Erro ao atualizar inventário de materiais: {e}")
-        finally:
-            if conn:
-                conn.close()
+            raise
 
-    def insert_pilot_profit(self, event_data, profit_type, amount):
-        """Insere um registro de lucro na tabela pilot_profit."""
-        conn = self.get_db_connection()
-        if not conn:
-            return
-
+    def _insert_pilot_profit(self, conn: sqlite3.Connection, event_data: Dict[str, Any], 
+                            profit_type: str, amount: int) -> None:
+        """Insere um registro de lucro (usa conexão existente)."""
         try:
             cursor = conn.cursor()
             sql = "INSERT INTO pilot_profit (timestamp, profit_type, amount) VALUES (?, ?, ?)"
             cursor.execute(sql, (event_data.get('timestamp'), profit_type, amount))
-            conn.commit()
-            logging.info(f"Lucro de {profit_type} de {amount} Cr registrado.")
 
         except sqlite3.Error as e:
             logging.error(f"Erro ao inserir lucro: {e}")
-        finally:
-            if conn:
-                conn.close()
+            raise
 
-    def update_system_data(self, event_data):
-        """Atualiza dados do sistema (corpos celestes, estações, sinais) na tabela system_data."""
-        conn = self.get_db_connection()
-        if not conn:
-            return
-
+    def _update_system_data(self, conn: sqlite3.Connection, event_data: Dict[str, Any]) -> None:
+        """Atualiza dados do sistema (usa conexão existente)."""
         try:
             cursor = conn.cursor()
             event_type = event_data.get('event')
@@ -303,72 +316,49 @@ class BackendCore:
             if not system_name:
                 return
 
-            # Limpa dados antigos do sistema ao entrar em um novo sistema
             if event_type == 'FSDJump':
                 cursor.execute("DELETE FROM system_data WHERE system_name != ?", (system_name,))
-                conn.commit()
-                logging.info(f"Dados de sistemas antigos limpos ao entrar em {system_name}.")
                 
-            # Processa corpos celestes (do evento 'FSDJump' ou 'Location' - SystemData)
             if event_type in ['FSDJump', 'Location'] and 'Body' in event_data:
-                # O evento FSDJump/Location contém dados da estrela principal e da estação
-                
-                # 1. Estrela Principal
                 star_name = event_data.get('Body')
-                star_type = event_data.get('StarType')
-                star_data = json.dumps(event_data)
+                star_data = json.dumps(event_data, ensure_ascii=False)
                 
                 sql = "INSERT OR REPLACE INTO system_data (name, system_name, type, distance_ls, data_json) VALUES (?, ?, ?, ?, ?)"
                 cursor.execute(sql, (star_name, system_name, 'STAR', 0.0, star_data))
                 
-                # 2. Estação (se estiver atracado)
                 if event_data.get('StationName'):
                     station_name = event_data.get('StationName')
-                    station_type = event_data.get('StationType')
+                    cursor.execute(sql, (station_name, system_name, 'STATION', None, star_data))
                     
-                    # Distância da estrela principal não está no Location/FSDJump, mas a inserimos
-                    cursor.execute(sql, (station_name, system_name, 'STATION', None, json.dumps(event_data)))
-                    
-            # Processa escaneamento de corpos (do evento 'Scan')
             elif event_type == 'Scan':
                 body_name = event_data.get('BodyName')
-                body_type = event_data.get('BodyType')
+                body_type = event_data.get('BodyType', 'Unknown')
                 distance = event_data.get('DistanceFromArrivalLS')
                 
                 sql = "INSERT OR REPLACE INTO system_data (name, system_name, type, distance_ls, data_json) VALUES (?, ?, ?, ?, ?)"
-                cursor.execute(sql, (body_name, system_name, body_type, distance, json.dumps(event_data)))
+                cursor.execute(sql, (body_name, system_name, body_type, distance, 
+                                   json.dumps(event_data, ensure_ascii=False)))
                 
-            # Processa sinais (do evento 'FSSSignalDiscovered')
             elif event_type == 'FSSSignalDiscovered':
                 signal_name = event_data.get('SignalName')
-                signal_type = event_data.get('SignalType')
                 
                 sql = "INSERT OR REPLACE INTO system_data (name, system_name, type, distance_ls, data_json) VALUES (?, ?, ?, ?, ?)"
-                cursor.execute(sql, (signal_name, system_name, 'SIGNAL', None, json.dumps(event_data)))
-                
-            conn.commit()
-            logging.info(f"Dados do sistema '{system_name}' atualizados por evento '{event_type}'.")
+                cursor.execute(sql, (signal_name, system_name, 'SIGNAL', None, 
+                                   json.dumps(event_data, ensure_ascii=False)))
 
         except sqlite3.Error as e:
             logging.error(f"Erro ao atualizar dados do sistema: {e}")
-        finally:
-            if conn:
-                conn.close()
+            raise
 
-    def update_ship_modules(self, event_data):
-        """Atualiza o loadout da nave na tabela ship_modules."""
+    def _update_ship_modules(self, conn: sqlite3.Connection, event_data: Dict[str, Any]) -> None:
+        """Atualiza o loadout da nave (usa conexão existente)."""
         if event_data.get('event') != 'Loadout':
             return
             
-        conn = self.get_db_connection()
-        if not conn:
-            return
-
         try:
             cursor = conn.cursor()
             ship_id = event_data.get('ShipID')
             
-            # Limpa o loadout antigo para esta nave
             cursor.execute("DELETE FROM ship_modules WHERE ship_id = ?", (ship_id,))
             
             modules = event_data.get('Modules', [])
@@ -376,66 +366,84 @@ class BackendCore:
             for module in modules:
                 slot = module.get('Slot')
                 item = module.get('Item')
-                health = module.get('Health', 1.0) # Assume 1.0 se não houver saúde
+                health = min(max(module.get('Health', 1.0), 0.0), 1.0)  # FIX: Validar range
                 
-                sql = "INSERT INTO ship_modules (ship_id, slot, module, health) VALUES (?, ?, ?, ?)"
-                cursor.execute(sql, (ship_id, slot, item, health))
-                
-            conn.commit()
-            logging.info(f"Loadout da nave {ship_id} atualizado com {len(modules)} módulos.")
+                if slot and item:
+                    sql = "INSERT INTO ship_modules (ship_id, slot, module, health) VALUES (?, ?, ?, ?)"
+                    cursor.execute(sql, (ship_id, slot, item, health))
 
         except sqlite3.Error as e:
             logging.error(f"Erro ao atualizar módulos da nave: {e}")
+            raise
+
+    # FIX: Usar uma única transação para processar eventos
+    def process_event(self, event_data: Dict[str, Any]) -> None:
+        """Processa um evento do diário e o insere no banco de dados."""
+        
+        conn = self.get_db_connection()
+        if not conn:
+            return
+
+        try:
+            conn.execute("BEGIN TRANSACTION")
+            
+            event_id = self._insert_journal_event(conn, event_data)
+            if event_id is None:
+                conn.rollback()
+                return  # Evento duplicado
+
+            event_type = event_data.get('event')
+
+            self._update_pilot_status(conn, event_data)
+            
+            # Processar lucros
+            if event_type == 'MarketSell':
+                profit = event_data.get('SellPrice', 0) * event_data.get('Count', 0)
+                self._insert_pilot_profit(conn, event_data, 'TRADE', profit)
+            elif event_type == 'Bounty':
+                self._insert_pilot_profit(conn, event_data, 'BOUNTY', event_data.get('Reward', 0))
+            elif event_type == 'MultiSellExplorationData':
+                self._insert_pilot_profit(conn, event_data, 'EXPLORATION', event_data.get('TotalEarnings', 0))
+            elif event_type == 'SellOrganicData':
+                self._insert_pilot_profit(conn, event_data, 'EXOBIOLOGY', event_data.get('TotalEarnings', 0))
+                
+            if event_type == 'Materials':
+                self._update_pilot_materials(conn, event_data)
+                
+            if event_type in ['FSDJump', 'Location', 'Scan', 'FSSSignalDiscovered']:
+                self._update_system_data(conn, event_data)
+                
+            if event_type == 'Loadout':
+                self._update_ship_modules(conn, event_data)
+
+            conn.commit()
+            
+        except sqlite3.Error as e:
+            conn.rollback()
+            logging.error(f"Erro ao processar evento '{event_data.get('event')}': {e}")
+        except Exception as e:
+            conn.rollback()
+            logging.error(f"Erro inesperado ao processar evento: {e}")
         finally:
             if conn:
                 conn.close()
 
-    def process_event(self, event_data):
-        """Processa um evento do diário e o insere no banco de dados."""
-        
-        # 1. Insere o evento bruto e verifica se é duplicado
-        event_id = self.insert_journal_event(event_data)
-        if event_id is None:
-            return # Evento duplicado ou erro de inserção
-
-        event_type = event_data.get('event')
-
-        # 2. Atualiza o status do piloto (ranques, localização, nave)
-        self.update_pilot_status(event_data)
-        
-        # 3. Processa eventos de lucro
-        if event_type == 'MarketSell':
-            self.insert_pilot_profit(event_data, 'TRADE', event_data.get('SellPrice') * event_data.get('Count'))
-        elif event_type == 'Bounty':
-            self.insert_pilot_profit(event_data, 'BOUNTY', event_data.get('Reward'))
-        elif event_type == 'MultiSellExplorationData':
-            self.insert_pilot_profit(event_data, 'EXPLORATION', event_data.get('TotalEarnings'))
-        elif event_type == 'Scan' and event_data.get('ScanType') == 'Detailed':
-            # Lucro de Cartografia (Exploração) - O valor exato é complexo, mas o evento Scan é o gatilho
-            # Para simplificar, vamos registrar o evento, o valor será somado no SellExplorationData
-            pass
-        elif event_type == 'SellOrganicData':
-            self.insert_pilot_profit(event_data, 'EXOBIOLOGY', event_data.get('TotalEarnings'))
-            
-        # 4. Atualiza o inventário de materiais
-        if event_type == 'Materials':
-            self.update_pilot_materials(event_data)
-            
-        # 5. Atualiza dados do sistema (corpos, estações, sinais)
-        if event_type in ['FSDJump', 'Location', 'Scan', 'FSSSignalDiscovered']:
-            self.update_system_data(event_data)
-            
-        # 6. Atualiza módulos da nave
-        if event_type == 'Loadout':
-            self.update_ship_modules(event_data)
-
     # --- Funções de Controle ---
 
-    def start_monitoring(self):
+    def start_monitoring(self) -> None:
         """Inicia o monitoramento do arquivo de diário mais recente."""
         if self.is_running:
             logging.warning("Monitoramento já está em execução.")
             return
+
+        # FIX: Limpar observer anterior se existir
+        if self.observer:
+            try:
+                self.observer.stop()
+                self.observer.join(timeout=2.0)
+            except:
+                pass
+            self.observer = None
 
         latest_file = get_latest_journal_file(self.JOURNAL_DIR)
         if not latest_file:
@@ -447,26 +455,26 @@ class BackendCore:
         self.observer.schedule(self.event_handler, os.path.dirname(latest_file), recursive=False)
         self.observer.start()
         self.is_running = True
+        self.event_count = 0  # Reset contador
         logging.info("Monitoramento iniciado.")
 
-        # Inicia o monitoramento EDDN em uma thread separada
-        # self.eddn_thread = threading.Thread(target=start_eddn_monitoring, args=(self.process_event,))
-        # self.eddn_thread.daemon = True
-        # self.eddn_thread.start()
-
-    def stop_monitoring(self):
+    def stop_monitoring(self) -> None:
         """Para o monitoramento."""
         if self.observer:
-            self.observer.stop()
-            self.observer.join()
+            try:
+                self.observer.stop()
+                self.observer.join(timeout=2.0)
+            except Exception as e:
+                logging.error(f"Erro ao parar observer: {e}")
+            
         if self.event_handler:
             self.event_handler.stop()
         
         self.is_running = False
-        logging.info("Monitoramento parado.")
+        logging.info(f"Monitoramento parado. Total de eventos processados: {self.event_count}")
+
 
 if __name__ == '__main__':
-    # Exemplo de uso (apenas para teste)
     core = BackendCore(JOURNAL_DIR)
     core.start_monitoring()
     
