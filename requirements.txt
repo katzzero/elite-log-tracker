@@ -1,5 +1,8 @@
-mysql-connector-python
-watchdog
-requests
-PySide6 # Escolhendo PySide6 (Qt) para a GUI cross-platform
+# Elite Dangerous Log Tracker - Dependências
+# Instale todas as dependências com: pip install -r requirements.txt
 
+# Interface Gráfica (Qt for Python)
+PySide6>=6.5.0
+
+# Monitoramento de arquivos em tempo real
+watchdog>=3.0.0
