@@ -2,7 +2,7 @@ import csv
 import os
 import logging
 import sqlite3
-from typing import Optional, List
+from typing import Optional, List, Callable
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -33,12 +33,11 @@ class CSVExporter:
 
     def export_table_to_csv(self, table_name: str, output_path: str) -> bool:
         """Exporta o conteúdo de uma tabela específica para um arquivo CSV."""
-        
         # FIX: Validação contra SQL injection
         if table_name not in ALLOWED_TABLES:
             logging.error(f"Tabela não permitida para exportação: {table_name}")
             return False
-        
+
         conn = self.get_db_connection()
         if not conn:
             logging.error(f"Não foi possível exportar a tabela {table_name}: Falha na conexão com o DB.")
@@ -49,17 +48,16 @@ class CSVExporter:
             # Agora é seguro usar f-string pois validamos contra whitelist
             query = f"SELECT * FROM {table_name}"
             cursor.execute(query)
-            
+
             # Obtém os nomes das colunas
             column_names = [i[0] for i in cursor.description]
 
             # FIX: UTF-8-BOM para compatibilidade com Excel no Windows
             with open(output_path, 'w', newline='', encoding='utf-8-sig') as csvfile:
                 csv_writer = csv.writer(csvfile)
-                
                 # Escreve o cabeçalho
                 csv_writer.writerow(column_names)
-                
+
                 # Escreve as linhas de dados
                 row_count = 0
                 for row in cursor:
@@ -84,25 +82,38 @@ class CSVExporter:
             if conn:
                 conn.close()
 
-    def export_all_data(self, base_output_dir: str) -> List[str]:
-        """Exporta todas as tabelas relevantes para arquivos CSV no diretório especificado."""
-        
+    def export_all_data(self, base_output_dir: str, progress_callback: Optional[Callable[[int], None]] = None) -> List[str]:
+        """Exporta todas as tabelas relevantes para arquivos CSV no diretório especificado.
+
+        Args:
+            base_output_dir: Diretório onde os arquivos CSV serão salvos
+            progress_callback: Função opcional que recebe o percentual de progresso (0-100)
+
+        Returns:
+            Lista com os caminhos dos arquivos exportados com sucesso
+        """
         if not os.path.exists(base_output_dir):
             try:
                 os.makedirs(base_output_dir, exist_ok=True)
             except OSError as e:
                 logging.error(f"Não foi possível criar diretório de saída: {e}")
                 return []
-        
+
         exported_files = []
-        
-        for table_name in ALLOWED_TABLES:
+        total_tables = len(ALLOWED_TABLES)
+
+        for index, table_name in enumerate(ALLOWED_TABLES):
             filename = f"{table_name}.csv"
             output_path = os.path.join(base_output_dir, filename)
-            
+
             if self.export_table_to_csv(table_name, output_path):
                 exported_files.append(output_path)
-        
+
+            # FIX: Emitir progresso após cada tabela exportada
+            if progress_callback:
+                progress_percent = int(((index + 1) / total_tables) * 100)
+                progress_callback(progress_percent)
+
         logging.info(f"Exportação concluída: {len(exported_files)}/{len(ALLOWED_TABLES)} tabelas exportadas.")
         return exported_files
 
