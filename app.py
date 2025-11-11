@@ -259,6 +259,97 @@ class ProfitTrackerView(QWidget):
                 conn.close()
 
 
+class MaterialsInventoryView(QWidget):
+    """Visualização para exibir o inventário de materiais do piloto."""
+    def __init__(self, backend_core: BackendCore, parent=None):
+        super().__init__(parent)
+        self.backend_core = backend_core
+        self.table_widget = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        title = QLabel("Inventário de Materiais (Engenharia e Síntese)")
+        title.setFont(QFont("Arial", 16, QFont.Bold))
+        layout.addWidget(title)
+        
+        self.update_button = QPushButton("Atualizar Inventário")
+        layout.addWidget(self.update_button)
+        
+        self.table_widget = QTableWidget()
+        self.table_widget.setColumnCount(4)
+        self.table_widget.setHorizontalHeaderLabels(["Material", "Tipo", "Quantidade", "Capacidade"])
+        self.table_widget.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table_widget.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table_widget.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table_widget.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        
+        layout.addWidget(self.table_widget)
+        layout.addStretch()
+        
+        self.update_button.clicked.connect(self.update_materials_display)
+
+    @Slot()
+    def update_materials_display(self):
+        conn = self.backend_core.get_db_connection()
+        if not conn:
+            QMessageBox.critical(self, "Erro de Conexão", 
+                               "Não foi possível conectar ao banco de dados SQLite.")
+            return
+
+        try:
+            cursor = conn.cursor()
+            # Seleciona todos os materiais, ordenados por tipo e nome
+            sql = "SELECT material_name, material_type, count FROM pilot_materials ORDER BY material_type, material_name"
+            cursor.execute(sql)
+            materials_data = cursor.fetchall()
+            
+            self.table_widget.setRowCount(len(materials_data))
+            
+            for row_num, row_data in enumerate(materials_data):
+                material_name, material_type, count = row_data
+                
+                # 1. Material Name
+                self.table_widget.setItem(row_num, 0, QTableWidgetItem(material_name))
+                
+                # 2. Material Type
+                self.table_widget.setItem(row_num, 1, QTableWidgetItem(material_type))
+                
+                # 3. Quantidade (com barra de progresso)
+                # Busca a capacidade máxima do material (se existir)
+                max_capacity = MATERIAL_LIMITS.get(material_name, 0)
+                
+                progress_bar = QProgressBar()
+                progress_bar.setRange(0, max_capacity if max_capacity > 0 else 1)
+                progress_bar.setValue(count)
+                
+                # Define a cor da barra de progresso
+                if count >= max_capacity and max_capacity > 0:
+                    # Vermelho se estiver no limite
+                    progress_bar.setStyleSheet("QProgressBar::chunk { background-color: red; }")
+                elif count > max_capacity * 0.8 and max_capacity > 0:
+                    # Amarelo se estiver perto do limite
+                    progress_bar.setStyleSheet("QProgressBar::chunk { background-color: orange; }")
+                else:
+                    # Verde
+                    progress_bar.setStyleSheet("QProgressBar::chunk { background-color: green; }")
+                
+                progress_bar.setFormat(f"{count} / {max_capacity}")
+                
+                self.table_widget.setCellWidget(row_num, 2, progress_bar)
+                
+                # 4. Capacidade Máxima
+                self.table_widget.setItem(row_num, 3, QTableWidgetItem(str(max_capacity)))
+                
+            self.table_widget.resizeRowsToContents()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Erro de Consulta", f"Erro ao buscar dados de materiais: {e}")
+        finally:
+            if conn:
+                conn.close()
+
 class PilotRanksView(QWidget):
     """Visualização para exibir o status e progresso dos ranques do piloto."""
     def __init__(self, backend_core: BackendCore, parent=None):
@@ -463,11 +554,14 @@ class MainWindow(QMainWindow):
         
         self.stacked_widget.addWidget(self.config_view)
         self.stacked_widget.addWidget(self.control_view)
+        self.materials_inventory_view = MaterialsInventoryView(self.backend_core)
+        self.stacked_widget.addWidget(self.materials_inventory_view)
         self.stacked_widget.addWidget(self.profit_tracker_view)
         self.stacked_widget.addWidget(self.pilot_ranks_view)
 
         self.nav_menu.addItem("Configuração")
         self.nav_menu.addItem("Controle")
+        self.nav_menu.addItem("Inventário de Materiais")
         self.nav_menu.addItem("Rastreamento de Lucro")
         self.nav_menu.addItem("Ranques do Piloto")
 
@@ -497,6 +591,9 @@ class MainWindow(QMainWindow):
         self.control_view.start_button.clicked.connect(self.start_backend_worker)
         self.control_view.stop_button.clicked.connect(self.stop_backend_worker)
         self.control_view.export_button.clicked.connect(self.start_csv_export_worker)
+
+        # Conecta o botão de atualização da nova view
+        self.materials_inventory_view.update_button.clicked.connect(self.materials_inventory_view.update_materials_display)
 
     @Slot()
     def browse_journal_path(self):
