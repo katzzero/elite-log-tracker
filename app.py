@@ -324,16 +324,22 @@ class MaterialsInventoryView(QWidget):
                 progress_bar.setRange(0, max_capacity if max_capacity > 0 else 1)
                 progress_bar.setValue(count)
                 
-                # Define a cor da barra de progresso
-                if count >= max_capacity and max_capacity > 0:
-                    # Vermelho se estiver no limite
-                    progress_bar.setStyleSheet("QProgressBar::chunk { background-color: red; }")
-                elif count > max_capacity * 0.8 and max_capacity > 0:
-                    # Amarelo se estiver perto do limite
-                    progress_bar.setStyleSheet("QProgressBar::chunk { background-color: orange; }")
+                # Define a cor da barra de progresso (Invertida: Verde para Alto, Vermelho para Baixo)
+                if max_capacity > 0:
+                    percentage = (count / max_capacity) * 100
+                    
+                    if percentage >= 70:
+                        # Verde (70% a 100%) - Quantidade alta
+                        progress_bar.setStyleSheet("QProgressBar::chunk { background-color: green; }")
+                    elif percentage >= 20:
+                        # Amarelo (20% a 70%) - Quantidade média
+                        progress_bar.setStyleSheet("QProgressBar::chunk { background-color: orange; }")
+                    else:
+                        # Vermelho (<20%) - Quantidade baixa/crítica
+                        progress_bar.setStyleSheet("QProgressBar::chunk { background-color: red; }")
                 else:
-                    # Verde
-                    progress_bar.setStyleSheet("QProgressBar::chunk { background-color: green; }")
+                    # Cor padrão para materiais sem limite definido
+                    progress_bar.setStyleSheet("QProgressBar::chunk { background-color: lightgray; }")
                 
                 progress_bar.setFormat(f"{count} / {max_capacity}")
                 
